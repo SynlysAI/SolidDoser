@@ -16,7 +16,9 @@ class SystemRunState(Enum):
     DEVICE_INITING = "设备初始化中"
     INITIALIZING = "初始化中"
     FEEDING_BOTTLE = "试剂瓶进料中"
+    WAITING_BOTTLE = "等待进瓶中"
     DOSING = "加料中"
+    WAITING_PICKUP = "等待取瓶中"
     DISCHARGING_BOTTLE = "试剂瓶出料中"
 
 
@@ -57,6 +59,8 @@ class SolidDoserSystemState:
     # 本机发起的出料握手
     bottle_discharge_request_id: str = ""
     bottle_discharge_peer_done: bool = False
+    # 主机联机加料申请 id（DOSE_REQUEST → … → BOTTLE_REMOVED）
+    host_dose_request_id: str = ""
 
     def clear_dose_live(self) -> None:
         self.dose_live_barcode = ""

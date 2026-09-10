@@ -105,14 +105,23 @@ def init_schema() -> Path:
         )
         cur.execute(
             """
-            INSERT OR IGNORE INTO app_meta (key, value)
-            VALUES ('schema_version', '2')
+            CREATE TABLE IF NOT EXISTS material_dose_totals (
+                barcode TEXT PRIMARY KEY,
+                total_mg REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
             """
         )
         cur.execute(
             """
-            UPDATE app_meta SET value = '2'
-            WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 2
+            INSERT OR IGNORE INTO app_meta (key, value)
+            VALUES ('schema_version', '3')
+            """
+        )
+        cur.execute(
+            """
+            UPDATE app_meta SET value = '3'
+            WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 3
             """
         )
         conn.commit()

@@ -34,6 +34,10 @@ from BusinessActions.SolidDoserSystem.system_actions import (
 )
 from BusinessActions.SolidDoserSystem.system_context import SolidDoserSystemContext
 from Common.DoseRecordsStore import DoseRecord, load_dose_records
+from Common.MaterialDoseTotalsStore import (
+    MaterialDoseTotal,
+    load_material_dose_totals,
+)
 from Common.MotionSettingsStore import save_lift_work_mm
 from Drivers.SartoriusBalance.balance_driver import get_balance_driver
 from Drivers.SartoriusBalance.balance_protocol import BalanceReading
@@ -327,6 +331,7 @@ class SolidDoserAutoTabWidget(QWidget):
         self._dose_add_btn: Optional[QPushButton] = None
         self._dose_del_btn: Optional[QPushButton] = None
         self._records_table: Optional[QTableWidget] = None
+        self._totals_table: Optional[QTableWidget] = None
         self._action_log_handler: Optional[Callable[[str], None]] = None
         self._balance_poll_busy = False
         self._balance_bridge = _BalancePollBridge(self)
@@ -346,6 +351,7 @@ class SolidDoserAutoTabWidget(QWidget):
         self._sync_lift_work_spin()
         self._load_dose_table(param_storage.solid_doser_system.dose_items)
         self._reload_dose_records()
+        self._reload_material_totals()
         self._refresh_status()
 
     def showEvent(self, event) -> None:
@@ -353,6 +359,7 @@ class SolidDoserAutoTabWidget(QWidget):
         self._sync_lift_work_spin()
         self._poll_timer.start()
         self._reload_dose_records()
+        self._reload_material_totals()
         self._refresh_status()
 
     def hideEvent(self, event) -> None:
@@ -586,7 +593,39 @@ class SolidDoserAutoTabWidget(QWidget):
         mid_row.addWidget(dose_card, 3)
         root.addLayout(mid_row)
 
-        # —— 加样记录（吃剩余高度） ——
+        # —— 累计加样 | 加样记录 ——
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(10)
+
+        totals_card = QFrame()
+        totals_card.setObjectName("Card")
+        totals_layout = QVBoxLayout(totals_card)
+        totals_layout.setContentsMargins(12, 10, 12, 12)
+        totals_layout.setSpacing(8)
+        totals_title = QLabel("物料累计加样")
+        totals_title.setObjectName("SectionTitle")
+        totals_layout.addWidget(totals_title)
+        totals_hint = QLabel("按条码汇总实际加样量；物料初始化时清零")
+        totals_hint.setObjectName("Hint")
+        totals_layout.addWidget(totals_hint)
+        self._totals_table = QTableWidget(0, 2)
+        self._totals_table.setHorizontalHeaderLabels(["物料条码", "累计(mg)"])
+        self._totals_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self._totals_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._totals_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self._totals_table.setColumnWidth(1, 100)
+        self._totals_table.horizontalHeader().setFixedHeight(_LIST_ROW_HEIGHT)
+        self._totals_table.verticalHeader().setVisible(False)
+        self._totals_table.verticalHeader().setDefaultSectionSize(_LIST_ROW_HEIGHT)
+        self._totals_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._totals_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._totals_table.setFocusPolicy(Qt.NoFocus)
+        self._totals_table.setMinimumHeight(_LIST_ROW_HEIGHT * 5 + 30)
+        self._totals_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        totals_layout.addWidget(self._totals_table, 1)
+        bottom_row.addWidget(totals_card, 2)
+
         records_card = QFrame()
         records_card.setObjectName("Card")
         records_layout = QVBoxLayout(records_card)
@@ -618,7 +657,8 @@ class SolidDoserAutoTabWidget(QWidget):
         self._records_table.setMinimumHeight(_LIST_ROW_HEIGHT * 5 + 30)
         self._records_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         records_layout.addWidget(self._records_table, 1)
-        root.addWidget(records_card, 1)
+        bottom_row.addWidget(records_card, 3)
+        root.addLayout(bottom_row, 1)
 
         # —— 底部操作 ——
         actions_card = QFrame()
@@ -683,6 +723,8 @@ class SolidDoserAutoTabWidget(QWidget):
             msg = st.last_message or "—"
             self._log_label.setText(f"日志 {prefix} · {msg}")
         self._refresh_materials_table(st)
+        if not st.is_busy:
+            self._reload_material_totals()
         if (not st.is_busy) and (not self._balance_poll_busy) and self.isVisible():
             self._balance_poll_busy = True
             self._balance_pool.start(_BalancePollTask(self._balance_bridge))
@@ -929,6 +971,26 @@ class SolidDoserAutoTabWidget(QWidget):
         for rec in records:
             self._append_record_row(rec)
 
+    def _reload_material_totals(self) -> None:
+        if self._totals_table is None:
+            return
+        rows = load_material_dose_totals()
+        self._totals_table.setRowCount(0)
+        for tot in rows:
+            self._append_total_row(tot)
+
+    def _append_total_row(self, tot: MaterialDoseTotal) -> None:
+        if self._totals_table is None:
+            return
+        row = self._totals_table.rowCount()
+        self._totals_table.insertRow(row)
+        self._totals_table.setRowHeight(row, _LIST_ROW_HEIGHT)
+        for col, text in enumerate((tot.barcode, f"{tot.total_mg:g}")):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._totals_table.setItem(row, col, item)
+
     def _append_record_row(self, rec: DoseRecord) -> None:
         if self._records_table is None:
             return
@@ -952,9 +1014,11 @@ class SolidDoserAutoTabWidget(QWidget):
         if not self.isVisible():
             self._poll_timer.stop()
         self._set_controls_for_idle(True)
-        if self._ctx is not None and action_name == "加料":
-            self._load_dose_table(self._ctx.system.dose_items)
+        if self._ctx is not None and action_name in ("加料", "物料初始化"):
+            if action_name == "加料":
+                self._load_dose_table(self._ctx.system.dose_items)
             self._reload_dose_records()
+            self._reload_material_totals()
         self._refresh_status()
         prefix = "成功" if ok else "失败"
         text = f"日志 {prefix} · {action_name} · {msg}"

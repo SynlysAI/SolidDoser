@@ -10,6 +10,11 @@ from BusinessActions.SolidDoserMotion import motion_actions as motion
 from BusinessActions.SolidDoserSystem.system_context import SolidDoserSystemContext
 from Common.ActionLogger import get_action_logger
 from Common.DoseRecordsStore import save_dose_record
+from Common.MaterialDoseTotalsStore import (
+    add_actual_mg,
+    clear_material_dose_totals,
+    reset_material_dose_totals,
+)
 from Common.StationMaterialsStore import save_station_materials
 from Drivers.SartoriusBalance.balance_driver import get_balance_driver
 from Drivers.SolidDoserMotion import motion_config as cfg
@@ -19,7 +24,10 @@ from Drivers.SolidDoserMotion.motion_driver import (
     get_motion_driver,
 )
 from UIInteraction.ParameterManagement.SolidDoserMotionModel import SolidDoserMotionState
-from UIInteraction.ParameterManagement.SolidDoserSystemModel import SystemRunState
+from UIInteraction.ParameterManagement.SolidDoserSystemModel import (
+    DoseItem,
+    SystemRunState,
+)
 
 ActionResult = Tuple[bool, str]
 _dose_log = logging.getLogger("soliddoser.dose")
@@ -127,11 +135,13 @@ def _begin(
     ctx: SolidDoserSystemContext,
     new_state: SystemRunState,
     action: str,
+    *,
+    from_states: Sequence[SystemRunState] = (SystemRunState.IDLE,),
 ) -> Optional[ActionResult]:
-    """仅允许从空闲进入忙碌态；失败时返回 ActionResult，成功返回 None。"""
+    """仅允许从指定态进入忙碌态；失败时返回 ActionResult，成功返回 None。"""
     if new_state == SystemRunState.IDLE:
         return _fail(ctx, action, "内部错误：不能 begin 到空闲。")
-    if ctx.system.run_state != SystemRunState.IDLE:
+    if ctx.system.run_state not in from_states:
         return _fail(
             ctx,
             action,
@@ -147,23 +157,36 @@ def _begin(
     return None
 
 
+def _finish_to(
+    ctx: SolidDoserSystemContext,
+    ok: bool,
+    action: str,
+    msg: str,
+    end_state: SystemRunState = SystemRunState.IDLE,
+) -> ActionResult:
+    """结束当前动作并进入指定态（默认空闲）。"""
+    ctx.system.run_state = end_state
+    ctx.system.abort_requested = False
+    if end_state == SystemRunState.IDLE:
+        ctx.system.bottle_feed_request_id = ""
+        ctx.system.bottle_discharge_request_id = ""
+        ctx.system.bottle_discharge_peer_done = False
+        ctx.system.host_dose_request_id = ""
+        ctx.system.clear_progress()
+    _sync_busy_flag(ctx)
+    refresh_system_flags(ctx)
+    if ok:
+        return _ok(ctx, action, msg)
+    return _fail(ctx, action, msg)
+
+
 def _finish(
     ctx: SolidDoserSystemContext,
     ok: bool,
     action: str,
     msg: str,
 ) -> ActionResult:
-    ctx.system.run_state = SystemRunState.IDLE
-    ctx.system.abort_requested = False
-    ctx.system.bottle_feed_request_id = ""
-    ctx.system.bottle_discharge_request_id = ""
-    ctx.system.bottle_discharge_peer_done = False
-    ctx.system.clear_progress()
-    _sync_busy_flag(ctx)
-    refresh_system_flags(ctx)
-    if ok:
-        return _ok(ctx, action, msg)
-    return _fail(ctx, action, msg)
+    return _finish_to(ctx, ok, action, msg, SystemRunState.IDLE)
 
 
 def _aborted(ctx: SolidDoserSystemContext) -> bool:
@@ -173,7 +196,7 @@ def _aborted(ctx: SolidDoserSystemContext) -> bool:
 def system_request_abort(ctx: SolidDoserSystemContext) -> ActionResult:
     """请求停止当前忙碌流程（由运行中的步骤轮询生效）。
 
-    试剂瓶进料/出料为等待主系统握手的占位态，停止时立即回到空闲并解锁。
+    等待握手的占位态（进料/出料/等待进瓶/等待取瓶）停止时立即回到空闲。
     """
     action = "停止"
     if not ctx.system.is_busy:
@@ -181,6 +204,8 @@ def system_request_abort(ctx: SolidDoserSystemContext) -> ActionResult:
     if ctx.system.run_state in (
         SystemRunState.FEEDING_BOTTLE,
         SystemRunState.DISCHARGING_BOTTLE,
+        SystemRunState.WAITING_BOTTLE,
+        SystemRunState.WAITING_PICKUP,
     ):
         return _finish(
             ctx,
@@ -280,6 +305,336 @@ def system_bottle_discharge_done(
     ctx.system.last_message = "已收到主系统出料完成信号。"
     msg = "出料完成信号已接收。"
     return True, msg, {**base, "status": "success", "message": msg}
+
+
+def dose_items_payload(ctx: SolidDoserSystemContext) -> list[dict]:
+    out: list[dict] = []
+    for it in ctx.system.dose_items or []:
+        out.append(
+            {
+                "barcode": (it.material_id or "").strip(),
+                "target_mg": float(it.weight_mg or 0.0),
+                "actual_mg": it.actual_mg,
+            }
+        )
+    return out
+
+
+def system_host_begin_device_init(
+    ctx: SolidDoserSystemContext, request_id: str = ""
+) -> Tuple[bool, str, dict]:
+    """主机：设备初始化请求（同步占用态并回 accepted，实际步骤由后台线程执行）。"""
+    from Common.HostBottleFeedConfig import CMD_DEVICE_INIT_REQUEST
+
+    action = "设备初始化"
+    rid = (request_id or "").strip()
+    base = {"cmd": CMD_DEVICE_INIT_REQUEST, "request_id": rid}
+    blocked = _begin(ctx, SystemRunState.DEVICE_INITING, action)
+    if blocked is not None:
+        return (
+            False,
+            blocked[1],
+            {
+                **base,
+                "status": "rejected",
+                "reason": "not_idle",
+                "message": blocked[1],
+            },
+        )
+    msg = "已接受设备初始化请求。"
+    ctx.system.last_message = msg
+    return True, msg, {**base, "status": "accepted", "message": msg}
+
+
+def system_host_begin_material_init(
+    ctx: SolidDoserSystemContext, request_id: str = ""
+) -> Tuple[bool, str, dict]:
+    """主机：物料初始化请求（同步占用态）。"""
+    from Common.HostBottleFeedConfig import CMD_MATERIAL_INIT_REQUEST
+
+    action = "物料初始化"
+    rid = (request_id or "").strip()
+    base = {"cmd": CMD_MATERIAL_INIT_REQUEST, "request_id": rid}
+    refresh_system_flags(ctx)
+    if not ctx.system.enabled_ok:
+        msg = "未使能，请先执行设备初始化/使能。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "not_enabled",
+            "message": msg,
+        }
+    if not ctx.system.datum_ok:
+        msg = "未回基准点，请先执行设备初始化/回基准点。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "not_datum",
+            "message": msg,
+        }
+    if not ctx.system.origin_ok:
+        msg = "未回原点，请先执行设备初始化/回原点。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "not_at_origin",
+            "message": msg,
+        }
+    blocked = _begin(ctx, SystemRunState.INITIALIZING, action)
+    if blocked is not None:
+        return (
+            False,
+            blocked[1],
+            {
+                **base,
+                "status": "rejected",
+                "reason": "not_idle",
+                "message": blocked[1],
+            },
+        )
+    msg = "已接受物料初始化请求。"
+    ctx.system.last_message = msg
+    return True, msg, {**base, "status": "accepted", "message": msg}
+
+
+def system_host_dose_request(
+    ctx: SolidDoserSystemContext,
+    items: list,
+    request_id: str = "",
+) -> Tuple[bool, str, dict]:
+    """主机加料申请：校验空闲+原点+条码，写入 dose_items，不立刻加料。"""
+    from Common.HostBottleFeedConfig import CMD_DOSE_REQUEST
+
+    rid = (request_id or "").strip()
+    base: dict = {"cmd": CMD_DOSE_REQUEST, "request_id": rid}
+
+    if ctx.system.run_state != SystemRunState.IDLE:
+        msg = f"系统忙碌（{ctx.system.state_label}），不响应加料申请。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "not_idle",
+            "message": msg,
+        }
+
+    refresh_system_flags(ctx)
+    if not ctx.system.origin_ok:
+        msg = "固体加样模块不在原点，不响应加料申请。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "not_at_origin",
+            "message": msg,
+        }
+
+    if not ctx.system.materials_ok:
+        msg = "物料表未初始化，不响应加料申请。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "materials_not_ready",
+            "message": msg,
+        }
+
+    if not isinstance(items, list) or not items:
+        msg = "加料清单为空或格式无效。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "bad_items",
+            "message": msg,
+        }
+
+    parsed: list[DoseItem] = []
+    missing: list[str] = []
+    for i, raw in enumerate(items, start=1):
+        if not isinstance(raw, dict):
+            msg = f"第{i}条物料不是对象。"
+            return False, msg, {
+                **base,
+                "status": "rejected",
+                "reason": "bad_items",
+                "message": msg,
+            }
+        barcode = str(
+            raw.get("barcode") or raw.get("material_id") or ""
+        ).strip()
+        try:
+            target = float(
+                raw.get("target_mg", raw.get("weight_mg", raw.get("weight", 0)))
+            )
+        except (TypeError, ValueError):
+            target = 0.0
+        if not barcode or target <= 0:
+            msg = f"第{i}条条码或目标重量无效。"
+            return False, msg, {
+                **base,
+                "status": "rejected",
+                "reason": "bad_items",
+                "message": msg,
+            }
+        if ctx.system.find_station_by_material(barcode) is None:
+            missing.append(barcode)
+        parsed.append(DoseItem(material_id=barcode, weight_mg=target, actual_mg=None))
+
+    if missing:
+        msg = "物料条码不在物料表中：" + ", ".join(missing)
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "barcode_missing",
+            "message": msg,
+            "missing": missing,
+        }
+
+    ctx.system.dose_items = parsed
+    ctx.system.host_dose_request_id = rid
+    ctx.system.clear_dose_live()
+    msg = f"可以响应加料申请（{len(parsed)} 条）。"
+    ctx.system.last_action = "加料申请"
+    ctx.system.last_message = msg
+    ctx.system.last_success = True
+    return True, msg, {
+        **base,
+        "status": "accepted",
+        "message": msg,
+        "items": dose_items_payload(ctx),
+    }
+
+
+def system_host_dose_confirm(
+    ctx: SolidDoserSystemContext, request_id: str = ""
+) -> Tuple[bool, str, dict]:
+    """设备已响应申请 → 进入等待进瓶。"""
+    from Common.HostBottleFeedConfig import CMD_DOSE_CONFIRM
+
+    rid = (request_id or "").strip()
+    base = {"cmd": CMD_DOSE_CONFIRM, "request_id": rid}
+    expected = (ctx.system.host_dose_request_id or "").strip()
+    if expected and rid and expected != rid:
+        msg = f"request_id 不匹配（期望 {expected}，收到 {rid}）。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "request_id_mismatch",
+            "message": msg,
+        }
+    if ctx.system.run_state != SystemRunState.IDLE:
+        msg = f"当前非空闲（{ctx.system.state_label}），无法确认加料。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "not_idle",
+            "message": msg,
+        }
+    if not ctx.system.dose_items:
+        msg = "无已接受的加料清单，请先 DOSE_REQUEST。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "no_dose_items",
+            "message": msg,
+        }
+    if rid:
+        ctx.system.host_dose_request_id = rid
+    blocked = _begin(ctx, SystemRunState.WAITING_BOTTLE, "等待进瓶")
+    if blocked is not None:
+        return False, blocked[1], {
+            **base,
+            "status": "error",
+            "reason": "not_idle",
+            "message": blocked[1],
+        }
+    ctx.system.set_progress(0, 1, "等待设备放瓶")
+    msg = "已进入等待进瓶。"
+    return True, msg, {
+        **base,
+        "status": "ok",
+        "message": msg,
+        "state": "waiting_bottle",
+    }
+
+
+def system_host_begin_bottle_placed(
+    ctx: SolidDoserSystemContext, request_id: str = ""
+) -> Tuple[bool, str, dict]:
+    """已放瓶：从等待进瓶转入加料中（后台执行 dose）。"""
+    from Common.HostBottleFeedConfig import CMD_BOTTLE_PLACED
+
+    rid = (request_id or "").strip()
+    base = {"cmd": CMD_BOTTLE_PLACED, "request_id": rid}
+    expected = (ctx.system.host_dose_request_id or "").strip()
+    if expected and rid and expected != rid:
+        msg = f"request_id 不匹配（期望 {expected}，收到 {rid}）。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "request_id_mismatch",
+            "message": msg,
+        }
+    if ctx.system.run_state != SystemRunState.WAITING_BOTTLE:
+        msg = f"当前非等待进瓶（{ctx.system.state_label}）。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "not_waiting_bottle",
+            "message": msg,
+        }
+    blocked = _begin(
+        ctx,
+        SystemRunState.DOSING,
+        "加料",
+        from_states=(SystemRunState.WAITING_BOTTLE,),
+    )
+    if blocked is not None:
+        return False, blocked[1], {
+            **base,
+            "status": "error",
+            "reason": "busy",
+            "message": blocked[1],
+        }
+    msg = "已放瓶，开始加样。"
+    return True, msg, {
+        **base,
+        "status": "ok",
+        "message": msg,
+        "state": "dosing",
+    }
+
+
+def system_host_bottle_removed(
+    ctx: SolidDoserSystemContext, request_id: str = ""
+) -> Tuple[bool, str, dict]:
+    """取瓶完成 → 空闲。"""
+    from Common.HostBottleFeedConfig import CMD_BOTTLE_REMOVED
+
+    rid = (request_id or "").strip()
+    base = {"cmd": CMD_BOTTLE_REMOVED, "request_id": rid}
+    expected = (ctx.system.host_dose_request_id or "").strip()
+    if expected and rid and expected != rid:
+        msg = f"request_id 不匹配（期望 {expected}，收到 {rid}）。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "request_id_mismatch",
+            "message": msg,
+        }
+    if ctx.system.run_state != SystemRunState.WAITING_PICKUP:
+        msg = f"当前非等待取瓶（{ctx.system.state_label}）。"
+        return False, msg, {
+            **base,
+            "status": "error",
+            "reason": "not_waiting_pickup",
+            "message": msg,
+        }
+    _finish(ctx, True, "取瓶完成", "设备已取瓶，固体加样回到空闲。")
+    msg = "已回到空闲。"
+    return True, msg, {
+        **base,
+        "status": "success",
+        "message": msg,
+        "state": "idle",
+    }
 
 
 def system_run_bottle_discharge(ctx: SolidDoserSystemContext) -> ActionResult:
@@ -500,16 +855,22 @@ def system_run_go_origin(ctx: SolidDoserSystemContext) -> ActionResult:
     return _finish(ctx, ok, action, detail)
 
 
-def system_run_device_init(ctx: SolidDoserSystemContext) -> ActionResult:
+def system_run_device_init(
+    ctx: SolidDoserSystemContext,
+    *,
+    already_begun: bool = False,
+) -> ActionResult:
     """空闲 → 设备初始化中 → 空闲。
 
     全程保持忙碌，依次：使能 → 回基准点 → 回原点，避免阶段间隙被其它流程插入。
     任一步失败或中止则停止后续步骤。
+    already_begun=True 时表示调用方已进入 DEVICE_INITING（主机 UDP 先回 accepted）。
     """
     action = "设备初始化"
-    blocked = _begin(ctx, SystemRunState.DEVICE_INITING, action)
-    if blocked is not None:
-        return blocked
+    if not already_begun:
+        blocked = _begin(ctx, SystemRunState.DEVICE_INITING, action)
+        if blocked is not None:
+            return blocked
 
     try:
         ok, detail = _run_servo_on_all_steps(ctx)
@@ -534,7 +895,11 @@ def system_run_device_init(ctx: SolidDoserSystemContext) -> ActionResult:
         return _finish(ctx, False, action, f"设备初始化异常: {exc}")
 
 
-def system_run_initialize(ctx: SolidDoserSystemContext) -> ActionResult:
+def system_run_initialize(
+    ctx: SolidDoserSystemContext,
+    *,
+    already_begun: bool = False,
+) -> ActionResult:
     """空闲 → 初始化中 → 空闲。
 
     须已回原点。分度盘转一圈：每次开到加料位工位 N，扫码枪读的是背对背工位
@@ -543,22 +908,28 @@ def system_run_initialize(ctx: SolidDoserSystemContext) -> ActionResult:
     """
     action = "物料初始化"
     refresh_system_flags(ctx)
-    if not ctx.system.enabled_ok:
-        return _fail(ctx, action, "未使能，请先执行使能。")
-    if not ctx.system.datum_ok:
-        return _fail(ctx, action, "未回基准点，请先执行回基准点。")
-    if not ctx.system.origin_ok:
-        return _fail(ctx, action, "未回原点，请先执行回原点。")
+    if not already_begun:
+        if not ctx.system.enabled_ok:
+            return _fail(ctx, action, "未使能，请先执行使能。")
+        if not ctx.system.datum_ok:
+            return _fail(ctx, action, "未回基准点，请先执行回基准点。")
+        if not ctx.system.origin_ok:
+            return _fail(ctx, action, "未回原点，请先执行回原点。")
 
-    blocked = _begin(ctx, SystemRunState.INITIALIZING, action)
-    if blocked is not None:
-        return blocked
+        blocked = _begin(ctx, SystemRunState.INITIALIZING, action)
+        if blocked is not None:
+            return blocked
 
     station_count = cfg.INDEXING_STATION_COUNT
     stations = list(cfg.iter_indexing_stations())
     ctx.system.clear_materials()
     ctx.system.station_materials = {i: "" for i in stations}
     ctx.system.materials_ok = False
+    cleared, clear_detail = clear_material_dose_totals()
+    if cleared:
+        get_action_logger().record(f"物料累计加样量已清零（{clear_detail}）")
+    else:
+        get_action_logger().record(f"物料累计加样量清零失败：{clear_detail}")
     ctx.system.set_progress(0, station_count, "准备扫码")
     disc = get_indexing_disc()
     velocity = ctx.motion_ctx.motion.axis(cfg.INDEXING_AXIS_KEY).velocity
@@ -611,6 +982,16 @@ def system_run_initialize(ctx: SolidDoserSystemContext) -> ActionResult:
             f"{s}:{(c or '—')}"
             for s, c in sorted(ctx.system.station_materials.items())
         )
+        barcodes = [
+            (c or "").strip()
+            for _, c in sorted(ctx.system.station_materials.items())
+            if (c or "").strip()
+        ]
+        reset_ok, reset_detail = reset_material_dose_totals(barcodes)
+        if reset_ok:
+            get_action_logger().record(f"物料累计表已重建：{reset_detail}")
+        else:
+            get_action_logger().record(f"物料累计表重建失败：{reset_detail}")
         saved, save_detail = save_station_materials(ctx.system)
         save_note = (
             f"；已本地保存（{save_detail}）"
@@ -622,13 +1003,18 @@ def system_run_initialize(ctx: SolidDoserSystemContext) -> ActionResult:
         return _fail_init(f"初始化异常: {exc}")
 
 
-def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
-    """空闲 → 加料中 → 空闲。
+def system_run_dose(
+    ctx: SolidDoserSystemContext,
+    *,
+    hold_for_pickup: bool = False,
+    already_begun: bool = False,
+) -> ActionResult:
+    """空闲（或等待进瓶）→ 加料中 → 空闲（或等待取瓶）。
 
     输入：dose_items（条码 + 各自重量 mg）。
     前置：物料表有效、条码均在表中、重量>0、设备在原点。
-    顺序：水平工作 →（分度→振开→搅开→升降工作→天平闭环加料到目标→振停→搅停→升降原点）×N
-    → 水平原点。
+    hold_for_pickup=True：加料成功后进入 WAITING_PICKUP，不清空 host_dose_request_id。
+    already_begun=True：调用方已进入 DOSING。
     """
     action = "加料"
     items = list(ctx.system.dose_items or [])
@@ -688,10 +1074,18 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
         _log_dose(f"加料失败：{msg}")
         return _fail(ctx, action, msg)
 
-    blocked = _begin(ctx, SystemRunState.DOSING, action)
-    if blocked is not None:
-        _log_dose(f"加料失败：{blocked[1]}")
-        return blocked
+    if not already_begun:
+        from_states: Sequence[SystemRunState] = (
+            (SystemRunState.WAITING_BOTTLE, SystemRunState.IDLE)
+            if hold_for_pickup
+            else (SystemRunState.IDLE,)
+        )
+        blocked = _begin(
+            ctx, SystemRunState.DOSING, action, from_states=from_states
+        )
+        if blocked is not None:
+            _log_dose(f"加料失败：{blocked[1]}")
+            return blocked
 
     job_desc = "；".join(f"{m}@工位{s}/{w:g}mg" for m, s, w in jobs)
     _log_dose(f"加料开始：{job_desc}（天平闭环读重）")
@@ -879,6 +1273,12 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
                 _log_dose(f"加样记录已保存：{material_id} @ {save_detail}")
             else:
                 _log_dose(f"加样记录保存失败：{save_detail}")
+            if actual_mg is not None:
+                ok_tot, tot_detail = add_actual_mg(material_id, actual_mg)
+                if ok_tot:
+                    _log_dose(f"物料累计已更新：{material_id} +{actual_mg:g} mg")
+                else:
+                    _log_dose(f"物料累计更新失败：{tot_detail}")
 
         if _aborted(ctx):
             return _fail_dose("加料已停止。")
@@ -896,6 +1296,16 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
         actual_summary = "；".join(parts) if parts else job_desc
         done_msg = f"加料完成。{actual_summary}"
         _log_dose(f"加料成功：{done_msg}")
+        if hold_for_pickup:
+            ctx.system.set_progress(0, 1, "等待设备取瓶")
+            ctx.system.last_message = "加料完成，等待取瓶。"
+            return _finish_to(
+                ctx,
+                True,
+                action,
+                done_msg,
+                SystemRunState.WAITING_PICKUP,
+            )
         return _finish(ctx, True, action, done_msg)
     except Exception as exc:  # noqa: BLE001
         return _fail_dose(f"加料异常: {exc}")
