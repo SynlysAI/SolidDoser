@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class SystemRunState(Enum):
@@ -22,10 +22,11 @@ class SystemRunState(Enum):
 
 @dataclass
 class DoseItem:
-    """单次加料条目：条码 + 目标重量(mg)。"""
+    """单次加料条目：条码 + 目标重量(mg) + 实际加料量(mg，完成后回写)。"""
 
     material_id: str = ""
     weight_mg: float = 0.0
+    actual_mg: Optional[float] = None
 
 
 @dataclass
@@ -47,11 +48,31 @@ class SolidDoserSystemState:
     station_materials: Dict[int, str] = field(default_factory=dict)
     # 加料输入（自动页写入；每条条码可单独设重量 mg）
     dose_items: List[DoseItem] = field(default_factory=list)
+    # 加料过程实时显示（自动页主视觉）
+    dose_live_barcode: str = ""
+    dose_live_target_mg: Optional[float] = None
+    dose_live_actual_mg: Optional[float] = None
     # 主系统试剂瓶进料握手（UDP）；进料中保存 request_id 供 DONE 校验
     bottle_feed_request_id: str = ""
     # 本机发起的出料握手
     bottle_discharge_request_id: str = ""
     bottle_discharge_peer_done: bool = False
+
+    def clear_dose_live(self) -> None:
+        self.dose_live_barcode = ""
+        self.dose_live_target_mg = None
+        self.dose_live_actual_mg = None
+
+    def set_dose_live(
+        self,
+        *,
+        barcode: str = "",
+        target_mg: Optional[float] = None,
+        actual_mg: Optional[float] = None,
+    ) -> None:
+        self.dose_live_barcode = (barcode or "").strip()
+        self.dose_live_target_mg = target_mg
+        self.dose_live_actual_mg = actual_mg
 
     @property
     def is_busy(self) -> bool:

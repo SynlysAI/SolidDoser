@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QComboBox,
@@ -197,7 +197,8 @@ QPushButton#DangerBtn {
 
 
 class _MotionActionThread(QThread):
-    finished = Signal(bool, str, str)
+    # 勿覆盖 QThread.finished，否则易导致原生闪退
+    action_done = Signal(bool, str, str)
 
     def __init__(self, fn: ActionFn, ctx: SolidDoserMotionContext, action_name: str):
         super().__init__()
@@ -208,29 +209,33 @@ class _MotionActionThread(QThread):
     def run(self) -> None:
         try:
             ok, msg = self._fn(self._ctx)
-            self.finished.emit(ok, msg, self._action_name)
+            self.action_done.emit(ok, msg, self._action_name)
         except Exception as e:
-            self.finished.emit(False, str(e), self._action_name)
+            self.action_done.emit(False, str(e), self._action_name)
 
 
-class _DiPollThread(QThread):
-    """后台轮询 PLC 全状态（含轴位置与 DI），避免界面只重绘缓存。"""
+class _DiPollBridge(QObject):
+    """DI 轮询结果桥回主线程（配合 QThreadPool，避免每 400ms 新建 QThread）。"""
 
     polled = Signal(object, str)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+
+class _DiPollTask(QRunnable):
+    def __init__(self, bridge: _DiPollBridge):
+        super().__init__()
+        self.setAutoDelete(True)
+        self._bridge = bridge
 
     def run(self) -> None:
         try:
             status, err = get_motion_driver().read_status()
-            self.polled.emit(status, err)
+            self._bridge.polled.emit(status, err)
         except Exception as exc:
-            self.polled.emit(None, str(exc))
+            self._bridge.polled.emit(None, str(exc))
 
 
 class _AxisActionThread(QThread):
-    finished = Signal(bool, str, str)
+    action_done = Signal(bool, str, str)
 
     def __init__(
         self,
@@ -248,13 +253,13 @@ class _AxisActionThread(QThread):
     def run(self) -> None:
         try:
             ok, msg = self._fn(self._ctx, self._axis_key)
-            self.finished.emit(ok, msg, self._action_name)
+            self.action_done.emit(ok, msg, self._action_name)
         except Exception as e:
-            self.finished.emit(False, str(e), self._action_name)
+            self.action_done.emit(False, str(e), self._action_name)
 
 
 class _ScannerActionThread(QThread):
-    finished = Signal(bool, str, str)
+    action_done = Signal(bool, str, str)
 
     def __init__(self, fn: ScannerActionFn, ctx: ScannerContext, action_name: str):
         super().__init__()
@@ -265,13 +270,13 @@ class _ScannerActionThread(QThread):
     def run(self) -> None:
         try:
             ok, msg = self._fn(self._ctx)
-            self.finished.emit(ok, msg, self._action_name)
+            self.action_done.emit(ok, msg, self._action_name)
         except Exception as e:
-            self.finished.emit(False, str(e), self._action_name)
+            self.action_done.emit(False, str(e), self._action_name)
 
 
 class _BalanceActionThread(QThread):
-    finished = Signal(bool, str, str)
+    action_done = Signal(bool, str, str)
 
     def __init__(self, fn: BalanceActionFn, ctx: BalanceContext, action_name: str):
         super().__init__()
@@ -282,9 +287,9 @@ class _BalanceActionThread(QThread):
     def run(self) -> None:
         try:
             ok, msg = self._fn(self._ctx)
-            self.finished.emit(ok, msg, self._action_name)
+            self.action_done.emit(ok, msg, self._action_name)
         except Exception as e:
-            self.finished.emit(False, str(e), self._action_name)
+            self.action_done.emit(False, str(e), self._action_name)
 
 
 def _make_btn(text: str, *, primary: bool = False, danger: bool = False) -> QPushButton:
@@ -331,7 +336,11 @@ class SolidDoserMotionDebugTabWidget(QWidget):
         self._balance_ctx: Optional[BalanceContext] = None
         self._thread: Optional[QThread] = None
         self._stop_thread: Optional[QThread] = None
-        self._di_thread: Optional[QThread] = None
+        self._di_busy = False
+        self._di_bridge = _DiPollBridge(self)
+        self._di_bridge.polled.connect(self._on_di_polled)
+        self._di_pool = QThreadPool(self)
+        self._di_pool.setMaxThreadCount(1)
         self._di_timer = QTimer(self)
         self._di_timer.setInterval(400)
         self._di_timer.timeout.connect(self._poll_di)
@@ -398,25 +407,30 @@ class SolidDoserMotionDebugTabWidget(QWidget):
         super().closeEvent(event)
 
     def shutdown_di_poll(self) -> None:
-        """主窗口关闭时调用，避免轮询线程未结束导致进程异常退出。"""
+        """主窗口关闭时调用，避免轮询/动作线程未结束导致进程异常退出。"""
         self._di_closing = True
         self._status_timer.stop()
         self._stop_di_poll(wait=True)
+        for attr in ("_thread", "_stop_thread"):
+            thread = getattr(self, attr, None)
+            if thread is None:
+                continue
+            setattr(self, attr, None)
+            if thread.isRunning():
+                thread.wait(3000)
 
     def _stop_di_poll(self, *, wait: bool = False) -> None:
         self._di_timer.stop()
-        thread = self._di_thread
-        if thread is None:
-            return
         if not wait:
             return
-        self._di_thread = None
-        try:
-            thread.polled.disconnect(self._on_di_polled)
-        except (RuntimeError, TypeError):
-            pass
-        if thread.isRunning():
-            thread.wait(2000)
+        self._di_pool.waitForDone(2000)
+        self._di_busy = False
+
+    def _arm_worker(self, thread: QThread, slot) -> None:
+        """启动动作线程：用 action_done 回传结果，用原生 finished 回收对象。"""
+        thread.action_done.connect(slot)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def _system_busy(self) -> bool:
         return bool(self._param_storage and self._param_storage.is_system_busy)
@@ -963,16 +977,15 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._di_closing
             or self._ctx is None
             or self._thread is not None
-            or self._di_thread is not None
+            or self._di_busy
         ):
             return
-        self._di_thread = _DiPollThread(self)
-        self._di_thread.polled.connect(self._on_di_polled)
-        self._di_thread.start()
+        self._di_busy = True
+        self._di_pool.start(_DiPollTask(self._di_bridge))
 
     def _on_di_polled(self, status, err: str) -> None:
-        self._di_thread = None
-        if self._ctx is None:
+        self._di_busy = False
+        if self._di_closing or self._ctx is None:
             return
         if status is not None:
             apply_status_to_state(self._ctx.motion, status)
@@ -1006,8 +1019,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
         self._stop_thread = _AxisActionThread(
             motion_axis_stop, self._ctx, axis_key, action_name
         )
-        self._stop_thread.finished.connect(self._on_stop_finished)
-        self._stop_thread.start()
+        self._arm_worker(self._stop_thread, self._on_stop_finished)
 
     def _on_stop_finished(self, ok: bool, msg: str, action_name: str) -> None:
         self._stop_thread = None
@@ -1038,8 +1050,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
         self._sync_all_params()
         self._set_buttons_enabled(False)
         self._thread = _MotionActionThread(fn, self._ctx, action_name)
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_axis_action(
         self,
@@ -1054,8 +1065,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
         self._sync_axis_params(axis_key)
         self._set_buttons_enabled(False)
         self._thread = _AxisActionThread(fn, self._ctx, axis_key, action_name)
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_horizontal_go_origin(self) -> None:
         if self._ctx is None or self._thread is not None:
@@ -1069,8 +1079,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._ctx,
             "水平电机 回原点",
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_indexing_go_origin(self) -> None:
         if self._ctx is None or self._thread is not None:
@@ -1084,8 +1093,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._ctx,
             "分度电机 回原点",
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_indexing_go_station(self) -> None:
         if self._ctx is None or self._thread is not None:
@@ -1103,8 +1111,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._ctx,
             f"分度盘 → 工位 {station}",
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_lift_go_origin(self) -> None:
         if self._ctx is None or self._thread is not None:
@@ -1118,8 +1125,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._ctx,
             "升降电机 回原点",
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_powder_go_origin(self) -> None:
         if self._ctx is None or self._thread is not None:
@@ -1133,25 +1139,22 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             self._ctx,
             "承粉电机 回原点",
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_do_action(self, do_key: str, on: bool, action_name: str) -> None:
         if self._ctx is None or self._thread is not None:
             return
         if self._reject_if_system_busy():
             return
-        di_thread = self._di_thread
-        if di_thread is not None and di_thread.isRunning():
-            di_thread.wait(500)
+        if self._di_busy:
+            self._di_pool.waitForDone(500)
         self._set_buttons_enabled(False)
         self._thread = _MotionActionThread(
             lambda ctx: motion_do_set(ctx, do_key, on),
             self._ctx,
             action_name,
         )
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_scanner_action(self, fn: ScannerActionFn, action_name: str) -> None:
         if self._scanner_ctx is None or self._thread is not None:
@@ -1160,8 +1163,7 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             return
         self._set_buttons_enabled(False)
         self._thread = _ScannerActionThread(fn, self._scanner_ctx, action_name)
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)
 
     def _run_balance_action(self, fn: BalanceActionFn, action_name: str) -> None:
         if self._balance_ctx is None or self._thread is not None:
@@ -1170,5 +1172,4 @@ class SolidDoserMotionDebugTabWidget(QWidget):
             return
         self._set_buttons_enabled(False)
         self._thread = _BalanceActionThread(fn, self._balance_ctx, action_name)
-        self._thread.finished.connect(self._on_action_finished)
-        self._thread.start()
+        self._arm_worker(self._thread, self._on_action_finished)

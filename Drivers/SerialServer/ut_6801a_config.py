@@ -18,5 +18,10 @@ SERIAL_SERVER_PORT = int(os.environ.get("SOLIDDOSER_SERIAL_SERVER_PORT", "10000"
 CONNECT_TIMEOUT_S = 3.0
 IO_TIMEOUT_S = 5.0
 
-# 串口侧建议与天平一致（在 UT-6801A Web「串口设置」中配置，非上位机 TCP 参数）
-SERIAL_PARAMS_HINT = "9600 8N1（须与天平及 UT-6801A Web 串口设置一致）"
+# 串口侧须与天平 DEVICE→COM-RS232 一致（在 UT-6801A Web「串口设置」配置，非上位机 TCP 参数）。
+# Cubis II MCE 出厂：9600、8 数据位、奇校验(ODD)、硬件握手(HARDWARE)、协议 SBI。
+# 现场可改为双方一致的 NONE 校验；握手双方 NONE（三线）。
+# 本机实测：UT-6801A ↔ 天平须用交叉线（按打印键时 RX 灯闪为准）。
+SERIAL_PARAMS_HINT = (
+    "双方一致（常用 9600 8N1；握手 NONE；协议 SBI；AUTO W/O；现场交叉线）"
+)

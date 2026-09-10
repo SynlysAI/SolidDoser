@@ -87,7 +87,7 @@ class HorizontalNamedPosition:
 
 HORIZONTAL_POSITIONS: Tuple[HorizontalNamedPosition, ...] = (
     HorizontalNamedPosition("origin", "原点位置", 10.0),
-    HorizontalNamedPosition("work", "工作位置", 20.0),
+    HorizontalNamedPosition("work", "工作位置", 105.0),
 )
 
 HORIZONTAL_POSITION_BY_KEY: Dict[str, HorizontalNamedPosition] = {
@@ -104,6 +104,12 @@ def horizontal_position_mm(key: str) -> float:
 
 # 升降轴命名位置（mm）：原点 / 工作
 LIFT_AXIS_KEY = "lift"
+LIFT_WORK_MM_DEFAULT = 28.0
+LIFT_WORK_MM_MIN = 22.0
+LIFT_WORK_MM_MAX = 30.0
+
+# 运行时覆盖（启动时从数据库加载；界面修改后更新）
+_lift_work_mm: float = LIFT_WORK_MM_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -115,7 +121,7 @@ class LiftNamedPosition:
 
 LIFT_POSITIONS: Tuple[LiftNamedPosition, ...] = (
     LiftNamedPosition("origin", "原点位置", 10.0),
-    LiftNamedPosition("work", "工作位置", 28.0),
+    LiftNamedPosition("work", "工作位置", LIFT_WORK_MM_DEFAULT),
 )
 
 LIFT_POSITION_BY_KEY: Dict[str, LiftNamedPosition] = {
@@ -123,8 +129,25 @@ LIFT_POSITION_BY_KEY: Dict[str, LiftNamedPosition] = {
 }
 
 
+def clamp_lift_work_mm(value: float) -> float:
+    return max(LIFT_WORK_MM_MIN, min(LIFT_WORK_MM_MAX, float(value)))
+
+
+def get_lift_work_mm() -> float:
+    return _lift_work_mm
+
+
+def set_lift_work_mm(value: float) -> float:
+    """设置升降工作位（mm），自动夹到 22～30。"""
+    global _lift_work_mm
+    _lift_work_mm = clamp_lift_work_mm(value)
+    return _lift_work_mm
+
+
 def lift_position_mm(key: str) -> float:
     """按命名位置 key 取目标行程（mm）。"""
+    if key == "work":
+        return get_lift_work_mm()
     if key not in LIFT_POSITION_BY_KEY:
         raise KeyError(f"未知升降位置: {key}")
     return LIFT_POSITION_BY_KEY[key].position_mm

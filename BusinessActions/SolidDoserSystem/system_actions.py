@@ -9,7 +9,9 @@ from BusinessActions.KeyenceScanner.scanner_actions import scanner_trigger_read
 from BusinessActions.SolidDoserMotion import motion_actions as motion
 from BusinessActions.SolidDoserSystem.system_context import SolidDoserSystemContext
 from Common.ActionLogger import get_action_logger
+from Common.DoseRecordsStore import save_dose_record
 from Common.StationMaterialsStore import save_station_materials
+from Drivers.SartoriusBalance.balance_driver import get_balance_driver
 from Drivers.SolidDoserMotion import motion_config as cfg
 from Drivers.SolidDoserMotion.indexing_disc import get_indexing_disc
 from Drivers.SolidDoserMotion.motion_driver import (
@@ -22,8 +24,8 @@ from UIInteraction.ParameterManagement.SolidDoserSystemModel import SystemRunSta
 ActionResult = Tuple[bool, str]
 _dose_log = logging.getLogger("soliddoser.dose")
 
-# 加料参数（天平未接入前，工作段用固定延时）
-DOSE_WORK_DURATION_S = 10.0
+# 加料闭环超时（秒）；净重判据见 Drivers.SartoriusBalance.balance_config
+DOSE_MAX_WAIT_S = 180.0
 
 # 回基准点判定轴（搅拌不参与；顺序与 system_run_go_datum 中轴回基准一致）
 SYSTEM_DATUM_AXIS_KEYS: Sequence[str] = (
@@ -623,10 +625,9 @@ def system_run_initialize(ctx: SolidDoserSystemContext) -> ActionResult:
 def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
     """空闲 → 加料中 → 空闲。
 
-    输入：dose_items（条码 + 各自重量 mg；天平未接时用固定延时代替称重）。
-
+    输入：dose_items（条码 + 各自重量 mg）。
     前置：物料表有效、条码均在表中、重量>0、设备在原点。
-    顺序：水平工作 →（分度→振开→搅开→升降工作→延时→振停→搅停→升降原点）×N
+    顺序：水平工作 →（分度→振开→搅开→升降工作→天平闭环加料到目标→振停→搅停→升降原点）×N
     → 水平原点。
     """
     action = "加料"
@@ -693,16 +694,16 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
         return blocked
 
     job_desc = "；".join(f"{m}@工位{s}/{w:g}mg" for m, s, w in jobs)
-    _log_dose(
-        f"加料开始：{job_desc}"
-        f"（暂用延时 {DOSE_WORK_DURATION_S:g}s 代替称重）"
-    )
+    _log_dose(f"加料开始：{job_desc}（天平闭环读重）")
+    ctx.system.clear_dose_live()
 
     steps_per_mat = 8
     total = 1 + len(jobs) * steps_per_mat + 1
     disc = get_indexing_disc()
     indexing_vel = ctx.motion_ctx.motion.axis(cfg.INDEXING_AXIS_KEY).velocity
     progress = 0
+    balance = get_balance_driver()
+    actual_results: list[tuple[str, float, Optional[float]]] = []
 
     def _safe_stop_actuators() -> None:
         motion.motion_do_set(ctx.motion_ctx, "vibration", False)
@@ -710,18 +711,12 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
 
     def _fail_dose(msg: str) -> ActionResult:
         _safe_stop_actuators()
+        try:
+            balance.close_session()
+        except Exception:  # noqa: BLE001
+            pass
         _log_dose(f"加料失败：{job_desc}，原因={msg}")
         return _finish(ctx, False, action, msg)
-
-    def _sleep_interruptible(seconds: float, detail: str) -> Optional[str]:
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if _aborted(ctx):
-                return "加料已停止。"
-            remain = deadline - time.monotonic()
-            ctx.system.progress_detail = f"{detail}（剩余 {remain:.0f}s）"
-            time.sleep(min(0.2, max(0.0, remain)))
-        return None
 
     def _step(detail: str) -> None:
         nonlocal progress
@@ -729,6 +724,10 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
         ctx.system.set_progress(progress, total, detail)
 
     try:
+        ok, detail = balance.open_session()
+        if not ok:
+            return _fail_dose(f"天平连接失败：{detail}")
+
         if _aborted(ctx):
             return _fail_dose("加料已停止。")
         _step("水平电机 → 工作位置")
@@ -770,15 +769,43 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
 
             if _aborted(ctx):
                 return _fail_dose("加料已停止。")
-            _step(
-                f"{prefix} 加料中（{weight_mg:g} mg，延时 {DOSE_WORK_DURATION_S:g}s）"
+            _step(f"{prefix} 加料中（目标 {weight_mg:g} mg，天平闭环）")
+            ctx.system.set_dose_live(
+                barcode=material_id,
+                target_mg=weight_mg,
+                actual_mg=0.0,
             )
-            err = _sleep_interruptible(
-                DOSE_WORK_DURATION_S,
-                f"{prefix} 加料中",
+
+            def _on_progress(
+                reading,
+                delta_mg: float,
+                p=prefix,
+                tgt=weight_mg,
+                mid=material_id,
+            ) -> None:
+                ctx.system.progress_detail = (
+                    f"{p} 加料中 {delta_mg:g}/{tgt:g} mg · {reading.display}"
+                )
+                ctx.system.set_dose_live(
+                    barcode=mid,
+                    target_mg=tgt,
+                    actual_mg=delta_mg,
+                )
+                ctx.balance_ctx.balance.connected = True
+                ctx.balance_ctx.balance.last_raw = reading.raw
+                ctx.balance_ctx.balance.last_weight_value = reading.value
+                ctx.balance_ctx.balance.last_weight_unit = reading.unit
+                ctx.balance_ctx.balance.last_weight_display = reading.display
+
+            ok, detail, start_mg, end_mg = balance.wait_dose_delta_mg(
+                weight_mg,
+                max_wait_s=DOSE_MAX_WAIT_S,
+                abort_check=lambda: _aborted(ctx),
+                on_progress=_on_progress,
             )
-            if err:
-                return _fail_dose(err)
+            if not ok:
+                return _fail_dose(detail)
+            _log_dose(f"{prefix} 闭环停料：{detail}")
 
             if _aborted(ctx):
                 return _fail_dose("加料已停止。")
@@ -794,6 +821,37 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
             if not ok:
                 return _fail_dose(detail)
 
+            # 停振后稍等再读，得到更接近落定后的实际加料量
+            time.sleep(0.8)
+            final_reading, _ = balance.read_weight()
+            if (
+                final_reading is not None
+                and final_reading.value_mg is not None
+                and start_mg is not None
+            ):
+                actual_mg = final_reading.value_mg - start_mg
+                ctx.balance_ctx.balance.last_raw = final_reading.raw
+                ctx.balance_ctx.balance.last_weight_value = final_reading.value
+                ctx.balance_ctx.balance.last_weight_unit = final_reading.unit
+                ctx.balance_ctx.balance.last_weight_display = final_reading.display
+            elif start_mg is not None and end_mg is not None:
+                actual_mg = end_mg - start_mg
+            else:
+                actual_mg = None
+            actual_results.append((material_id, weight_mg, actual_mg))
+            ctx.system.set_dose_live(
+                barcode=material_id,
+                target_mg=weight_mg,
+                actual_mg=actual_mg,
+            )
+            # 回写到对应 dose_items，供界面显示实际量
+            for it in ctx.system.dose_items:
+                if (it.material_id or "").strip() == material_id and float(
+                    it.weight_mg or 0.0
+                ) == float(weight_mg):
+                    it.actual_mg = actual_mg
+                    break
+
             if _aborted(ctx):
                 return _fail_dose("加料已停止。")
             _step(f"{prefix} 升降电机 → 原点位置")
@@ -801,10 +859,26 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
             if not ok:
                 return _fail_dose(detail)
 
-            _log_dose(
-                f"加料单料完成：物料={material_id}，工位={station}，"
-                f"目标重量={weight_mg:g} mg"
+            if actual_mg is not None:
+                _log_dose(
+                    f"加料单料完成：物料={material_id}，工位={station}，"
+                    f"目标={weight_mg:g} mg，实际={actual_mg:g} mg"
+                )
+            else:
+                _log_dose(
+                    f"加料单料完成：物料={material_id}，工位={station}，"
+                    f"目标={weight_mg:g} mg，实际=未知"
+                )
+            ok_save, save_detail = save_dose_record(
+                barcode=material_id,
+                target_mg=weight_mg,
+                actual_mg=actual_mg,
+                station=station,
             )
+            if ok_save:
+                _log_dose(f"加样记录已保存：{material_id} @ {save_detail}")
+            else:
+                _log_dose(f"加样记录保存失败：{save_detail}")
 
         if _aborted(ctx):
             return _fail_dose("加料已停止。")
@@ -813,10 +887,20 @@ def system_run_dose(ctx: SolidDoserSystemContext) -> ActionResult:
         if not ok:
             return _fail_dose(detail)
 
-        done_msg = (
-            f"加料完成（{job_desc}，工作延时 {DOSE_WORK_DURATION_S:g}s）。"
-        )
-        _log_dose(f"加料成功：{job_desc}")
+        parts = []
+        for mid, tgt, act in actual_results:
+            if act is None:
+                parts.append(f"{mid}:目标{tgt:g}mg/实际—")
+            else:
+                parts.append(f"{mid}:目标{tgt:g}mg/实际{act:g}mg")
+        actual_summary = "；".join(parts) if parts else job_desc
+        done_msg = f"加料完成。{actual_summary}"
+        _log_dose(f"加料成功：{done_msg}")
         return _finish(ctx, True, action, done_msg)
     except Exception as exc:  # noqa: BLE001
         return _fail_dose(f"加料异常: {exc}")
+    finally:
+        try:
+            balance.close_session()
+        except Exception:  # noqa: BLE001
+            pass

@@ -5,13 +5,17 @@ from UIInteraction.UIGenerator.MainUI import MainUI
 from Common.ActionLogger import get_action_logger
 from Common.AppLogging import setup_app_logging, stop_log_maintenance
 from Common.LocalDatabase import init_schema
+from Common.MotionSettingsStore import load_motion_settings
 from Common.StationMaterialsStore import load_station_materials
 
 from BusinessActions.DeviceManager import DeviceManager
 
 from PySide6.QtCore import QObject, Signal
 
+import faulthandler
 import sys
+
+faulthandler.enable()
 
 from UIInteraction.ControlActions.ButtonActionManager import ButtonActionManager
 
@@ -78,13 +82,15 @@ if __name__ == "__main__":
 
     get_action_logger().record("应用启动")
 
-
+    init_schema()
+    motion_loaded, motion_detail = load_motion_settings()
+    if motion_loaded:
+        get_action_logger().record(f"已加载运动参数：{motion_detail}")
 
     main_window = MainUI()
 
     param_storage = ParameterStorage()
 
-    init_schema()
     loaded, load_detail = load_station_materials(param_storage.solid_doser_system)
     if loaded:
         get_action_logger().record(f"已加载上次物料条码：{load_detail}")

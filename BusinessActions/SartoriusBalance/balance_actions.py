@@ -40,6 +40,9 @@ def balance_test_connection(ctx: BalanceContext) -> ActionResult:
     ok, detail = driver.test_connection()
     ctx.balance.connected = ok
     if ok:
+        reading, _ = driver.read_weight()
+        if reading is not None:
+            _apply_reading(ctx, reading)
         return _ok(ctx, action, detail)
     return _fail(ctx, action, detail)
 
@@ -48,6 +51,11 @@ def balance_read_weight(ctx: BalanceContext) -> ActionResult:
     action = "读取重量"
     driver = get_balance_driver()
     ctx.balance.simulation_mode = driver.simulation
+    if not driver.session_open:
+        ok, detail = driver.open_session()
+        if not ok:
+            ctx.balance.connected = False
+            return _fail(ctx, action, detail)
     reading, err = driver.read_weight()
     if reading is None:
         ctx.balance.connected = False

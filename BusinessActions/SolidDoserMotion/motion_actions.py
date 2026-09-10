@@ -245,8 +245,8 @@ def motion_lift_go_named(
     axis = cfg.AXIS_BY_KEY[cfg.LIFT_AXIS_KEY]
     st = ctx.motion.axis(cfg.LIFT_AXIS_KEY)
     named = cfg.LIFT_POSITION_BY_KEY[position_key]
-    target = named.position_mm
-    action = f"{axis.label} → {named.label}"
+    target = cfg.lift_position_mm(position_key)
+    action = f"{axis.label} → {named.label}（{target:g} mm）"
     ok, detail = get_motion_driver().move_absolute(
         cfg.LIFT_AXIS_KEY, target, st.velocity
     )

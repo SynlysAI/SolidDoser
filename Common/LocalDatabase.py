@@ -53,8 +53,6 @@ def init_schema() -> Path:
     global _SCHEMA_READY
     path = get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if _SCHEMA_READY and path.is_file():
-        return path
 
     conn = sqlite3.connect(str(path))
     try:
@@ -89,8 +87,32 @@ def init_schema() -> Path:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS dose_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dosed_at TEXT NOT NULL,
+                barcode TEXT NOT NULL,
+                target_mg REAL NOT NULL,
+                actual_mg REAL,
+                station INTEGER
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dose_records_dosed_at
+            ON dose_records (dosed_at DESC)
+            """
+        )
+        cur.execute(
+            """
             INSERT OR IGNORE INTO app_meta (key, value)
-            VALUES ('schema_version', '1')
+            VALUES ('schema_version', '2')
+            """
+        )
+        cur.execute(
+            """
+            UPDATE app_meta SET value = '2'
+            WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 2
             """
         )
         conn.commit()
