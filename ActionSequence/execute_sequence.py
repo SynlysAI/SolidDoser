@@ -16,6 +16,7 @@ from DateBaseManager.database_manager import save_process_file, get_active_proce
 
 from BusinessActions.SingleStepActions.MotorAction import Wait
 from BusinessActions.DeviceManager import DeviceManager
+from BusinessActions.ProcessActions import process_auto_actions as auto
 from UIInteraction.ParameterManagement.ParameterStorage import ParameterStorage
 from Common.ActionLogger import get_action_logger
 
@@ -25,9 +26,24 @@ from Common.ActionLogger import get_action_logger
 # ------------------------------
 # 第二步：核心配置（命令名→函数映射）
 # ------------------------------
-# 关键：TXT中的命令名必须和字典的key完全一致
+# 关键：TXT中的命令名必须和字典的key完全一致（中英均可）
 command_to_func = {
     "WAIT": Wait,
+    "DEVICE_INIT": auto.DEVICE_INIT,
+    "SERVO_ON": auto.SERVO_ON,
+    "GO_DATUM": auto.GO_DATUM,
+    "GO_ORIGIN": auto.GO_ORIGIN,
+    "MATERIAL_INIT": auto.MATERIAL_INIT,
+    "DOSE": auto.DOSE,
+    "BOTTLE_DISCHARGE": auto.BOTTLE_DISCHARGE,
+    "设备初始化": auto.DEVICE_INIT,
+    "使能": auto.SERVO_ON,
+    "回基准点": auto.GO_DATUM,
+    "回原点": auto.GO_ORIGIN,
+    "物料初始化": auto.MATERIAL_INIT,
+    "加料": auto.DOSE,
+    "加样": auto.DOSE,
+    "试剂瓶出料": auto.BOTTLE_DISCHARGE,
 }
 
 # ------------------------------
@@ -213,7 +229,7 @@ def process_parameters_by_function(sequence, device_manager):
 # 第五步：按序列执行函数
 # ------------------------------
 def execute_sequence(sequence):
-    """遍历序列，按顺序执行每个函数"""
+    """遍历序列，按顺序执行每个函数；失败则中断。"""
     logger = get_action_logger()
     print("="*60)
     print("📋 命令序列执行开始")
@@ -228,10 +244,19 @@ def execute_sequence(sequence):
         print(f"命令名：{func.__name__}")
         print(f"参数：{args}")
         try:
-            func(*args)
+            result = func(*args)
+            if (
+                isinstance(result, tuple)
+                and len(result) >= 1
+                and result[0] is False
+            ):
+                detail = result[1] if len(result) > 1 else "执行失败"
+                raise RuntimeError(str(detail))
             print("状态：执行成功")
         except Exception as e:
             print(f"状态：执行失败 | 错误原因：{e}")
+            logger.record(f"工艺序列中断：第{idx}步 {func.__name__} · {e}")
+            raise
     
     print("\n" + "="*60)
     print("🏁 命令序列执行结束")

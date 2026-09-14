@@ -1,4 +1,4 @@
-"""SolidDoser 轻量启动：流程导入 + 自动 + 调试 + 主系统进料 UDP。"""
+"""SolidDoser 轻量启动：自动 + 调试 + 流程导入 + 主系统进料 UDP。"""
 import sys
 
 from PySide6.QtWidgets import QApplication

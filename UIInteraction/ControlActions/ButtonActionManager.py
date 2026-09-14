@@ -83,7 +83,15 @@ class ProcessExecutionThread(QThread):
                 get_action_logger().record(
                     f"工艺流程步骤 {idx}/{len(sequence)}: {func.__name__} 参数: {args_repr}"
                 )
-                func(*args)
+                result = func(*args)
+                if (
+                    isinstance(result, tuple)
+                    and len(result) >= 1
+                    and result[0] is False
+                ):
+                    detail = result[1] if len(result) > 1 else "执行失败"
+                    self.error.emit(f"第 {idx} 个命令执行失败：{detail}")
+                    return False
             except Exception as e:
                 self.error.emit(f"第 {idx} 个命令执行失败：{str(e)}")
                 return False

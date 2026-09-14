@@ -33,7 +33,7 @@ ActionResult = Tuple[bool, str]
 _dose_log = logging.getLogger("soliddoser.dose")
 
 # 加料闭环超时（秒）；净重判据见 Drivers.SartoriusBalance.balance_config
-DOSE_MAX_WAIT_S = 180.0
+DOSE_MAX_WAIT_S = 300.0
 
 # 回基准点判定轴（搅拌不参与；顺序与 system_run_go_datum 中轴回基准一致）
 SYSTEM_DATUM_AXIS_KEYS: Sequence[str] = (
@@ -1198,8 +1198,13 @@ def system_run_dose(
                 on_progress=_on_progress,
             )
             if not ok:
-                return _fail_dose(detail)
-            _log_dose(f"{prefix} 闭环停料：{detail}")
+                # 超时：不停在当前位置，继续停振/停搅/回原与记实际量
+                if "加料超时" in (detail or ""):
+                    _log_dose(f"{prefix} 闭环超时，继续后续动作：{detail}")
+                else:
+                    return _fail_dose(detail)
+            else:
+                _log_dose(f"{prefix} 闭环停料：{detail}")
 
             if _aborted(ctx):
                 return _fail_dose("加料已停止。")

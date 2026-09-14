@@ -116,6 +116,20 @@ def _migrate_legacy_json(conn) -> bool:
     return True
 
 
+def clear_station_materials(state: SolidDoserSystemState) -> Tuple[bool, str]:
+    """清空工位物料条码（内存 + SQLite），并作废 materials_ok。"""
+    try:
+        state.clear_materials()
+        state.station_materials = {i: "" for i in cfg.iter_indexing_stations()}
+        ok, detail = save_station_materials(state)
+        if not ok:
+            return False, detail
+        return True, "物料表已清空"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("清空物料条码失败：%s", exc)
+        return False, str(exc)
+
+
 def load_station_materials(state: SolidDoserSystemState) -> Tuple[bool, str]:
     """从 SQLite 加载工位条码；成功则 materials_ok=True。
 

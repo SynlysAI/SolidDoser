@@ -144,7 +144,7 @@ class MainUI(QMainWindow):
         get_action_logger().persist()
 
     def set_action_log(self, text: str) -> None:
-        """三个页签共用的底部日志（流程导入 / 自动 / 调试）。"""
+        """三个页签共用的底部日志（自动 / 调试 / 流程导入）。"""
         if self.label_log is None:
             return
         msg = (text or "").strip() or "—"
@@ -160,29 +160,29 @@ class MainUI(QMainWindow):
         root_layout.setSpacing(8)
         tabs = QTabWidget()
 
-        # 自动在调试之前
-        tab_titles = ["流程导入", "自动", "调试"]
+        # 自动 → 调试 → 流程导入
+        tab_titles = ["自动", "调试", "流程导入"]
         for idx, title in enumerate(tab_titles):
             tab = QWidget()
             layout = QVBoxLayout(tab)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(10)
             if idx == 0:
-                self._build_process_tab(layout)
-            elif idx == 1:
                 from UIInteraction.UIGenerator.SolidDoserAutoTabWidget import (
                     SolidDoserAutoTabWidget,
                 )
 
                 self.solid_doser_auto_tab_widget = SolidDoserAutoTabWidget()
                 layout.addWidget(self.solid_doser_auto_tab_widget)
-            elif idx == 2:
+            elif idx == 1:
                 from UIInteraction.UIGenerator.SolidDoserMotionDebugTabWidget import (
                     SolidDoserMotionDebugTabWidget,
                 )
 
                 self.solid_doser_motion_debug_tab_widget = SolidDoserMotionDebugTabWidget()
                 layout.addWidget(self.solid_doser_motion_debug_tab_widget)
+            elif idx == 2:
+                self._build_process_tab(layout)
             tabs.addTab(tab, title)
 
         root_layout.addWidget(tabs, 1)

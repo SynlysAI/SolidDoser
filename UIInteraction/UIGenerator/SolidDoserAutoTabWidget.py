@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStyledItemDelegate,
@@ -36,9 +37,11 @@ from BusinessActions.SolidDoserSystem.system_context import SolidDoserSystemCont
 from Common.DoseRecordsStore import DoseRecord, load_dose_records
 from Common.MaterialDoseTotalsStore import (
     MaterialDoseTotal,
+    clear_material_dose_totals,
     load_material_dose_totals,
 )
 from Common.MotionSettingsStore import save_lift_work_mm
+from Common.StationMaterialsStore import clear_station_materials
 from Drivers.SartoriusBalance.balance_driver import get_balance_driver
 from Drivers.SartoriusBalance.balance_protocol import BalanceReading
 from Drivers.SolidDoserMotion import motion_config as motion_cfg
@@ -50,30 +53,39 @@ ActionFn = Callable[[SolidDoserSystemContext], Tuple[bool, str]]
 # 与调试页轴按钮一致的高度/字号；宽度兼顾「试剂瓶出料」
 _AUTO_BTN_MIN_WIDTH = 96
 _AUTO_BTN_SPACING = 6
-_LIST_ROW_HEIGHT = 28
-_DOSE_WEIGHT_COL_WIDTH = 88
-# 中部两表等高：8 工位 + 表头
-_MID_TABLE_HEIGHT = _LIST_ROW_HEIGHT * 8 + 30
+_LIST_ROW_HEIGHT = 26
+_DOSE_WEIGHT_COL_WIDTH = 80
+# 中部三表等高：8 工位 + 表头
+_MID_TABLE_HEIGHT = _LIST_ROW_HEIGHT * 8 + 28
 _RECORDS_LOAD_LIMIT = 200
 
 _STYLESHEET = """
 SolidDoserAutoTabWidget {
-    background: #eef2f7;
+    background: #e8edf4;
 }
 QFrame#Card {
     background: #ffffff;
-    border: 1px solid #e2e8f0;
+    border: 1px solid #d8e0ea;
+    border-radius: 6px;
+}
+QFrame#TopBanner {
+    background: #ffffff;
+    border: 1px solid #d8e0ea;
     border-radius: 8px;
 }
-QFrame#HeroCard {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #ffffff, stop:1 #f8fafc);
-    border: 1px solid #dbe3ef;
-    border-radius: 10px;
+QFrame#StatusStrip {
+    background: #ffffff;
+    border: 1px solid #d8e0ea;
+    border-radius: 6px;
+}
+QFrame#ActionBar {
+    background: #ffffff;
+    border: 1px solid #d8e0ea;
+    border-radius: 6px;
 }
 QLabel#SectionTitle {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 700;
     color: #0f172a;
 }
 QLabel#Hint {
@@ -81,57 +93,56 @@ QLabel#Hint {
     color: #94a3b8;
 }
 QLabel#DoseHeroCaption {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     color: #64748b;
 }
 QLabel#DoseHero {
-    font-size: 42px;
+    font-size: 40px;
     font-weight: 800;
     color: #0f172a;
     letter-spacing: -1px;
 }
 QLabel#DoseHeroUnit {
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 700;
-    color: #334155;
-    padding-bottom: 6px;
+    color: #64748b;
+    padding-bottom: 8px;
 }
 QLabel#DoseHeroMetaKey {
     font-size: 11px;
     color: #94a3b8;
 }
 QLabel#DoseHeroMetaVal {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: #1e293b;
 }
-QLabel#MetaKey {
+QLabel#BannerMetaKey {
     font-size: 11px;
     color: #94a3b8;
 }
-QLabel#MetaValue {
-    font-size: 13px;
-    font-weight: 600;
+QLabel#BannerMetaVal {
+    font-size: 14px;
+    font-weight: 700;
     color: #0f172a;
 }
 QLabel#BalanceWeight {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 700;
     color: #0f172a;
 }
-QLabel#LogValue {
+QLabel#StripText {
     font-size: 12px;
-    color: #64748b;
+    color: #475569;
 }
 QLabel#Field {
     font-size: 12px;
     color: #64748b;
 }
-QFrame#MetaDivider {
-    background: #e2e8f0;
-    max-width: 1px;
-    min-width: 1px;
+QLabel#LogValue {
+    font-size: 12px;
+    color: #64748b;
 }
 QLineEdit {
     font-size: 12px;
@@ -139,103 +150,83 @@ QLineEdit {
     border: 1px solid #cbd5e1;
     border-radius: 4px;
     background: #ffffff;
-    min-height: 28px;
-    max-height: 28px;
+    min-height: 26px;
+    max-height: 26px;
 }
-QLineEdit:focus {
-    border: 1px solid #3b82f6;
-}
-QLineEdit:disabled {
-    background: #f8fafc;
-    color: #94a3b8;
-}
+QLineEdit:focus { border: 1px solid #3b82f6; }
+QLineEdit:disabled { background: #f8fafc; color: #94a3b8; }
 QDoubleSpinBox {
     font-size: 12px;
-    min-height: 28px;
-    max-height: 28px;
+    min-height: 26px;
+    max-height: 26px;
     padding: 0px 4px;
+    background: #ffffff;
 }
 QTableWidget {
     font-size: 12px;
-    gridline-color: #eef2f7;
+    gridline-color: #edf2f7;
     border: 1px solid #e2e8f0;
     border-radius: 4px;
     background: #ffffff;
     outline: none;
 }
-QTableWidget::item {
-    padding: 0px 6px;
-}
-QTableWidget::item:selected {
-    background: #e0edff;
-    color: #0f172a;
-}
+QTableWidget::item { padding: 0px 4px; }
+QTableWidget::item:selected { background: #dbeafe; color: #0f172a; }
 QTableWidget QLineEdit {
     min-height: 0px;
-    max-height: 26px;
+    max-height: 24px;
     padding: 0px 4px;
     margin: 0px;
     border: 1px solid #3b82f6;
     border-radius: 2px;
-    background: #ffffff;
 }
 QHeaderView::section {
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 700;
     color: #64748b;
-    background: #f8fafc;
+    background: #f1f5f9;
     border: none;
     border-bottom: 1px solid #e2e8f0;
     border-right: 1px solid #eef2f7;
-    padding: 0px 6px;
-    min-height: 28px;
-    max-height: 28px;
+    padding: 0px 4px;
+    min-height: 26px;
+    max-height: 26px;
 }
 QPushButton {
     font-size: 12px;
     padding: 2px 10px;
-    min-height: 32px;
-    max-height: 32px;
+    min-height: 30px;
+    max-height: 30px;
     border: 1px solid #cbd5e1;
     border-radius: 5px;
     background: #ffffff;
     color: #334155;
 }
-QPushButton:hover {
-    background: #f1f5f9;
-    border-color: #94a3b8;
-}
+QPushButton:hover { background: #f1f5f9; border-color: #94a3b8; }
 QPushButton#PrimaryBtn {
-    border-color: #60a5fa;
+    border-color: #3b82f6;
     color: #1d4ed8;
     background: #eff6ff;
     font-weight: 700;
 }
-QPushButton#PrimaryBtn:hover {
-    background: #dbeafe;
-}
+QPushButton#PrimaryBtn:hover { background: #dbeafe; }
 QPushButton#PrimaryBtn:disabled {
-    color: #93c5fd;
-    background: #f8fbff;
-    border-color: #bfdbfe;
+    color: #93c5fd; background: #f8fbff; border-color: #bfdbfe;
 }
 QPushButton#DangerBtn {
-    border-color: #f87171;
+    border-color: #ef4444;
     color: #b91c1c;
     background: #fff1f2;
     font-weight: 700;
 }
-QPushButton#DangerBtn:hover {
-    background: #fee2e2;
-}
+QPushButton#DangerBtn:hover { background: #fee2e2; }
 QPushButton#DangerBtn:disabled {
-    color: #fca5a5;
-    background: #fff7f7;
-    border-color: #fecdd3;
+    color: #fca5a5; background: #fff7f7; border-color: #fecdd3;
 }
-QPushButton:disabled {
-    color: #94a3b8;
-    background: #f8fafc;
+QPushButton:disabled { color: #94a3b8; background: #f8fafc; }
+QPushButton#BannerSaveBtn {
+    min-height: 26px;
+    max-height: 26px;
 }
 """
 
@@ -325,6 +316,7 @@ class SolidDoserAutoTabWidget(QWidget):
         self._progress_label: Optional[QLabel] = None
         self._log_label: Optional[QLabel] = None
         self._materials_title: Optional[QLabel] = None
+        self._materials_clear_btn: Optional[QPushButton] = None
         self._materials_table: Optional[QTableWidget] = None
         self._material_row_by_station: Dict[int, int] = {}
         self._dose_table: Optional[QTableWidget] = None
@@ -332,6 +324,7 @@ class SolidDoserAutoTabWidget(QWidget):
         self._dose_del_btn: Optional[QPushButton] = None
         self._records_table: Optional[QTableWidget] = None
         self._totals_table: Optional[QTableWidget] = None
+        self._totals_clear_btn: Optional[QPushButton] = None
         self._action_log_handler: Optional[Callable[[str], None]] = None
         self._balance_poll_busy = False
         self._balance_bridge = _BalancePollBridge(self)
@@ -373,96 +366,80 @@ class SolidDoserAutoTabWidget(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setSpacing(6)
 
-        # —— 顶栏：左主视觉 | 右辅信息 ——
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(10)
+        # —— 顶栏：深色一体横幅（加样主视觉 + 状态/天平/升降） ——
+        banner = QFrame()
+        banner.setObjectName('TopBanner')
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(16, 12, 16, 12)
+        banner_layout.setSpacing(20)
 
-        hero_card = QFrame()
-        hero_card.setObjectName("HeroCard")
-        hero_card.setMinimumHeight(118)
-        hero_layout = QVBoxLayout(hero_card)
-        hero_layout.setContentsMargins(18, 14, 18, 14)
-        hero_layout.setSpacing(6)
-
-        caption = QLabel("本次加样")
-        caption.setObjectName("DoseHeroCaption")
-        hero_layout.addWidget(caption)
-
+        left = QVBoxLayout()
+        left.setSpacing(2)
+        cap = QLabel('本次加样')
+        cap.setObjectName('DoseHeroCaption')
+        left.addWidget(cap)
         value_row = QHBoxLayout()
-        value_row.setContentsMargins(0, 0, 0, 0)
         value_row.setSpacing(8)
-        self._dose_hero_label = QLabel("—")
-        self._dose_hero_label.setObjectName("DoseHero")
-        unit = QLabel("mg")
-        unit.setObjectName("DoseHeroUnit")
+        self._dose_hero_label = QLabel('—')
+        self._dose_hero_label.setObjectName('DoseHero')
+        unit = QLabel('mg')
+        unit.setObjectName('DoseHeroUnit')
         unit.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
         value_row.addWidget(self._dose_hero_label, 0, Qt.AlignBottom)
         value_row.addWidget(unit, 0, Qt.AlignBottom)
         value_row.addStretch(1)
-        hero_layout.addLayout(value_row)
-
+        left.addLayout(value_row)
         meta_pair = QHBoxLayout()
-        meta_pair.setContentsMargins(0, 4, 0, 0)
-        meta_pair.setSpacing(28)
-        target_box = QVBoxLayout()
-        target_box.setSpacing(2)
-        t_key = QLabel("目标")
-        t_key.setObjectName("DoseHeroMetaKey")
-        self._dose_hero_target_label = QLabel("—")
-        self._dose_hero_target_label.setObjectName("DoseHeroMetaVal")
-        target_box.addWidget(t_key)
-        target_box.addWidget(self._dose_hero_target_label)
-        barcode_box = QVBoxLayout()
-        barcode_box.setSpacing(2)
-        b_key = QLabel("条码")
-        b_key.setObjectName("DoseHeroMetaKey")
-        self._dose_hero_barcode_label = QLabel("—")
-        self._dose_hero_barcode_label.setObjectName("DoseHeroMetaVal")
-        barcode_box.addWidget(b_key)
-        barcode_box.addWidget(self._dose_hero_barcode_label)
-        meta_pair.addLayout(target_box)
-        meta_pair.addLayout(barcode_box)
+        meta_pair.setSpacing(24)
+        t_box = QVBoxLayout()
+        t_box.setSpacing(0)
+        t_key = QLabel('目标')
+        t_key.setObjectName('DoseHeroMetaKey')
+        self._dose_hero_target_label = QLabel('—')
+        self._dose_hero_target_label.setObjectName('DoseHeroMetaVal')
+        t_box.addWidget(t_key)
+        t_box.addWidget(self._dose_hero_target_label)
+        b_box = QVBoxLayout()
+        b_box.setSpacing(0)
+        b_key = QLabel('条码')
+        b_key.setObjectName('DoseHeroMetaKey')
+        self._dose_hero_barcode_label = QLabel('—')
+        self._dose_hero_barcode_label.setObjectName('DoseHeroMetaVal')
+        b_box.addWidget(b_key)
+        b_box.addWidget(self._dose_hero_barcode_label)
+        meta_pair.addLayout(t_box)
+        meta_pair.addLayout(b_box)
         meta_pair.addStretch(1)
-        hero_layout.addLayout(meta_pair)
-        top_row.addWidget(hero_card, 5)
+        left.addLayout(meta_pair)
+        banner_layout.addLayout(left, 3)
 
-        meta_card = QFrame()
-        meta_card.setObjectName("Card")
-        meta_card.setMinimumHeight(118)
-        meta_layout = QVBoxLayout(meta_card)
-        meta_layout.setContentsMargins(14, 12, 14, 12)
-        meta_layout.setSpacing(8)
-
-        status_row = QHBoxLayout()
-        status_row.setSpacing(18)
-        state_col = QVBoxLayout()
-        state_col.setSpacing(2)
-        sk = QLabel("状态")
-        sk.setObjectName("MetaKey")
-        self._state_label = QLabel("空闲中")
-        self._state_label.setObjectName("MetaValue")
-        state_col.addWidget(sk)
-        state_col.addWidget(self._state_label)
-        bal_col = QVBoxLayout()
-        bal_col.setSpacing(2)
-        bk = QLabel("天平")
-        bk.setObjectName("MetaKey")
-        self._balance_weight_label = QLabel("—")
-        self._balance_weight_label.setObjectName("BalanceWeight")
-        bal_col.addWidget(bk)
-        bal_col.addWidget(self._balance_weight_label)
-        status_row.addLayout(state_col)
-        status_row.addLayout(bal_col)
-        status_row.addStretch(1)
-        meta_layout.addLayout(status_row)
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        top_meta = QHBoxLayout()
+        top_meta.setSpacing(18)
+        for key, attr, obj_name in (
+            ('状态', '_state_label', 'BannerMetaVal'),
+            ('天平', '_balance_weight_label', 'BalanceWeight'),
+        ):
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            k = QLabel(key)
+            k.setObjectName('BannerMetaKey')
+            v = QLabel('—' if key == '天平' else '空闲中')
+            v.setObjectName(obj_name)
+            col.addWidget(k)
+            col.addWidget(v)
+            setattr(self, attr, v)
+            top_meta.addLayout(col)
+        top_meta.addStretch(1)
+        right.addLayout(top_meta)
 
         lift_row = QHBoxLayout()
-        lift_row.setSpacing(8)
-        lift_lab = QLabel("升降工作位")
-        lift_lab.setObjectName("Field")
+        lift_row.setSpacing(6)
+        lift_lab = QLabel('升降工作位')
+        lift_lab.setObjectName('Field')
         self._lift_work_spin = QDoubleSpinBox()
         self._lift_work_spin.setRange(
             motion_cfg.LIFT_WORK_MM_MIN, motion_cfg.LIFT_WORK_MM_MAX
@@ -470,62 +447,82 @@ class SolidDoserAutoTabWidget(QWidget):
         self._lift_work_spin.setDecimals(2)
         self._lift_work_spin.setSingleStep(0.1)
         self._lift_work_spin.setValue(motion_cfg.get_lift_work_mm())
-        self._lift_work_spin.setSuffix(" mm")
-        self._lift_work_spin.setMinimumWidth(108)
-        self._lift_work_save_btn = QPushButton("保存")
-        self._lift_work_save_btn.setMinimumWidth(56)
+        self._lift_work_spin.setSuffix(' mm')
+        self._lift_work_spin.setMinimumWidth(100)
+        self._lift_work_save_btn = QPushButton('保存')
+        self._lift_work_save_btn.setObjectName('BannerSaveBtn')
+        self._lift_work_save_btn.setMinimumWidth(52)
         self._lift_work_save_btn.clicked.connect(self._on_save_lift_work)
         lift_hint = QLabel(
-            f"{motion_cfg.LIFT_WORK_MM_MIN:g}～{motion_cfg.LIFT_WORK_MM_MAX:g}"
+            f'{motion_cfg.LIFT_WORK_MM_MIN:g}～{motion_cfg.LIFT_WORK_MM_MAX:g}'
         )
-        lift_hint.setObjectName("Hint")
+        lift_hint.setObjectName('Hint')
         lift_row.addWidget(lift_lab)
         lift_row.addWidget(self._lift_work_spin)
         lift_row.addWidget(self._lift_work_save_btn)
         lift_row.addWidget(lift_hint)
         lift_row.addStretch(1)
-        meta_layout.addLayout(lift_row)
+        right.addLayout(lift_row)
+        right.addStretch(1)
+        banner_layout.addLayout(right, 2)
+        root.addWidget(banner)
 
-        self._flags_label = QLabel("未使能 · 未回基准点 · 未回原点 · 未初始化")
-        self._flags_label.setObjectName("LogValue")
-        self._flags_label.setWordWrap(True)
-        self._progress_label = QLabel("进度 —")
-        self._progress_label.setObjectName("LogValue")
-        self._progress_label.setWordWrap(True)
-        self._log_label = QLabel("日志 —")
-        self._log_label.setObjectName("LogValue")
-        self._log_label.setWordWrap(True)
-        meta_layout.addWidget(self._flags_label)
-        meta_layout.addWidget(self._progress_label)
-        meta_layout.addWidget(self._log_label)
-        meta_layout.addStretch(1)
-        top_row.addWidget(meta_card, 4)
-        root.addLayout(top_row)
+        # —— 状态条：标识 / 进度 / 日志 单行 ——
+        strip = QFrame()
+        strip.setObjectName('StatusStrip')
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(12, 6, 12, 6)
+        strip_layout.setSpacing(16)
+        self._flags_label = QLabel('未使能 · 未回基准点 · 未回原点 · 未初始化')
+        self._flags_label.setObjectName('StripText')
+        self._progress_label = QLabel('进度 —')
+        self._progress_label.setObjectName('StripText')
+        self._log_label = QLabel('日志 —')
+        self._log_label.setObjectName('StripText')
+        self._log_label.setWordWrap(False)
+        strip_layout.addWidget(self._flags_label, 2)
+        strip_layout.addWidget(self._progress_label, 2)
+        strip_layout.addWidget(self._log_label, 3)
+        root.addWidget(strip)
 
-        # —— 中部：物料表 | 加料清单（等高） ——
-        mid_row = QHBoxLayout()
-        mid_row.setContentsMargins(0, 0, 0, 0)
-        mid_row.setSpacing(10)
+        # —— 工作区三栏：物料 | 加料清单 | 累计 ——
+        mid = QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(6)
+
+        def _make_card(title: str):
+            card = QFrame()
+            card.setObjectName('Card')
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(10, 8, 10, 10)
+            lay.setSpacing(6)
+            head = QLabel(title)
+            head.setObjectName('SectionTitle')
+            lay.addWidget(head)
+            return card, lay, head
 
         materials_card = QFrame()
         materials_card.setObjectName("Card")
         materials_layout = QVBoxLayout(materials_card)
-        materials_layout.setContentsMargins(12, 10, 12, 12)
-        materials_layout.setSpacing(8)
+        materials_layout.setContentsMargins(10, 8, 10, 10)
+        materials_layout.setSpacing(6)
+        mat_head = QHBoxLayout()
         self._materials_title = QLabel("物料表")
         self._materials_title.setObjectName("SectionTitle")
-        materials_layout.addWidget(self._materials_title)
-
+        mat_head.addWidget(self._materials_title)
+        mat_head.addStretch(1)
+        self._materials_clear_btn = QPushButton("清空")
+        self._materials_clear_btn.setMinimumWidth(56)
+        self._materials_clear_btn.clicked.connect(self._on_clear_materials)
+        mat_head.addWidget(self._materials_clear_btn)
+        materials_layout.addLayout(mat_head)
         stations = list(motion_cfg.iter_indexing_stations())
         self._materials_table = QTableWidget(len(stations), 2)
         self._materials_table.setHorizontalHeaderLabels(["工位", "条码"])
-        self._materials_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Fixed
-        )
-        self._materials_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
-        self._materials_table.setColumnWidth(0, 56)
+        self._materials_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self._materials_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self._materials_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._materials_table.setColumnWidth(0, 48)
         self._materials_table.horizontalHeader().setFixedHeight(_LIST_ROW_HEIGHT)
         self._materials_table.verticalHeader().setVisible(False)
         self._materials_table.verticalHeader().setDefaultSectionSize(_LIST_ROW_HEIGHT)
@@ -539,41 +536,37 @@ class SolidDoserAutoTabWidget(QWidget):
             st_item.setTextAlignment(Qt.AlignCenter)
             st_item.setFlags(st_item.flags() & ~Qt.ItemIsEditable)
             code_item = QTableWidgetItem("—")
+            code_item.setTextAlignment(Qt.AlignCenter)
             code_item.setFlags(code_item.flags() & ~Qt.ItemIsEditable)
             self._materials_table.setItem(row, 0, st_item)
             self._materials_table.setItem(row, 1, code_item)
             self._materials_table.setRowHeight(row, _LIST_ROW_HEIGHT)
             self._material_row_by_station[station] = row
         materials_layout.addWidget(self._materials_table)
-        mid_row.addWidget(materials_card, 2)
+        mid.addWidget(materials_card, 5)
 
         dose_card = QFrame()
         dose_card.setObjectName("Card")
         dose_layout = QVBoxLayout(dose_card)
-        dose_layout.setContentsMargins(12, 10, 12, 12)
-        dose_layout.setSpacing(8)
-
-        dose_head = QHBoxLayout()
-        dose_head.setContentsMargins(0, 0, 0, 0)
+        dose_layout.setContentsMargins(10, 8, 10, 10)
+        dose_layout.setSpacing(6)
+        title_row = QHBoxLayout()
         dose_title = QLabel("加料清单")
         dose_title.setObjectName("SectionTitle")
-        dose_unit = QLabel("单位 mg")
-        dose_unit.setObjectName("Hint")
-        dose_head.addWidget(dose_title)
-        dose_head.addWidget(dose_unit)
-        dose_head.addStretch(1)
+        title_row.addWidget(dose_title)
+        title_row.addStretch(1)
         self._dose_add_btn = QPushButton("添加")
-        self._dose_add_btn.setMinimumWidth(64)
+        self._dose_add_btn.setMinimumWidth(56)
         self._dose_add_btn.clicked.connect(self._on_dose_add_row)
         self._dose_del_btn = QPushButton("删除")
-        self._dose_del_btn.setMinimumWidth(64)
+        self._dose_del_btn.setMinimumWidth(56)
         self._dose_del_btn.clicked.connect(self._on_dose_del_row)
-        dose_head.addWidget(self._dose_add_btn)
-        dose_head.addWidget(self._dose_del_btn)
-        dose_layout.addLayout(dose_head)
-
+        title_row.addWidget(self._dose_add_btn)
+        title_row.addWidget(self._dose_del_btn)
+        dose_layout.addLayout(title_row)
         self._dose_table = QTableWidget(0, 3)
-        self._dose_table.setHorizontalHeaderLabels(["物料条码", "目标", "实际"])
+        self._dose_table.setHorizontalHeaderLabels(["物料条码", "目标(mg)", "实际(mg)"])
+        self._dose_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
         self._dose_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._dose_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self._dose_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
@@ -587,114 +580,103 @@ class SolidDoserAutoTabWidget(QWidget):
         self._dose_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._dose_table.setItemDelegate(_CompactCellDelegate(self._dose_table))
         self._dose_table.setFixedHeight(_MID_TABLE_HEIGHT)
-        self._dose_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         dose_layout.addWidget(self._dose_table)
         self._append_dose_row("", "", "")
-        mid_row.addWidget(dose_card, 3)
-        root.addLayout(mid_row)
-
-        # —— 累计加样 | 加样记录 ——
-        bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(0, 0, 0, 0)
-        bottom_row.setSpacing(10)
+        mid.addWidget(dose_card, 5)
 
         totals_card = QFrame()
         totals_card.setObjectName("Card")
         totals_layout = QVBoxLayout(totals_card)
-        totals_layout.setContentsMargins(12, 10, 12, 12)
-        totals_layout.setSpacing(8)
-        totals_title = QLabel("物料累计加样")
-        totals_title.setObjectName("SectionTitle")
-        totals_layout.addWidget(totals_title)
-        totals_hint = QLabel("按条码汇总实际加样量；物料初始化时清零")
-        totals_hint.setObjectName("Hint")
-        totals_layout.addWidget(totals_hint)
+        totals_layout.setContentsMargins(10, 8, 10, 10)
+        totals_layout.setSpacing(6)
+        tot_head = QHBoxLayout()
+        tot_title = QLabel("累计加样")
+        tot_title.setObjectName("SectionTitle")
+        tot_hint = QLabel("初始化时清零")
+        tot_hint.setObjectName("Hint")
+        tot_head.addWidget(tot_title)
+        tot_head.addWidget(tot_hint)
+        tot_head.addStretch(1)
+        self._totals_clear_btn = QPushButton("清空")
+        self._totals_clear_btn.setMinimumWidth(56)
+        self._totals_clear_btn.clicked.connect(self._on_clear_totals)
+        tot_head.addWidget(self._totals_clear_btn)
+        totals_layout.addLayout(tot_head)
         self._totals_table = QTableWidget(0, 2)
-        self._totals_table.setHorizontalHeaderLabels(["物料条码", "累计(mg)"])
+        self._totals_table.setHorizontalHeaderLabels(["条码", "累计(mg)"])
         self._totals_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
         self._totals_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._totals_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self._totals_table.setColumnWidth(1, 100)
+        self._totals_table.setColumnWidth(1, 88)
         self._totals_table.horizontalHeader().setFixedHeight(_LIST_ROW_HEIGHT)
         self._totals_table.verticalHeader().setVisible(False)
         self._totals_table.verticalHeader().setDefaultSectionSize(_LIST_ROW_HEIGHT)
         self._totals_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._totals_table.setSelectionMode(QAbstractItemView.NoSelection)
         self._totals_table.setFocusPolicy(Qt.NoFocus)
-        self._totals_table.setMinimumHeight(_LIST_ROW_HEIGHT * 5 + 30)
-        self._totals_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        totals_layout.addWidget(self._totals_table, 1)
-        bottom_row.addWidget(totals_card, 2)
+        self._totals_table.setFixedHeight(_MID_TABLE_HEIGHT)
+        totals_layout.addWidget(self._totals_table)
+        mid.addWidget(totals_card, 4)
+        root.addLayout(mid)
 
-        records_card = QFrame()
-        records_card.setObjectName("Card")
-        records_layout = QVBoxLayout(records_card)
-        records_layout.setContentsMargins(12, 10, 12, 12)
-        records_layout.setSpacing(8)
-        records_title = QLabel("加样记录")
-        records_title.setObjectName("SectionTitle")
-        records_layout.addWidget(records_title)
+        # —— 加样记录通栏 ——
+        records_card, records_layout, _ = _make_card('加样记录')
         self._records_table = QTableWidget(0, 4)
         self._records_table.setHorizontalHeaderLabels(
             ["时间", "加样条码", "目标(mg)", "实际(mg)"]
         )
-        self._records_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
+        self._records_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self._records_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self._records_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self._records_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeToContents
-        )
-        self._records_table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeToContents
-        )
+        self._records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self._records_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self._records_table.setColumnWidth(0, 160)
+        self._records_table.setColumnWidth(2, 96)
+        self._records_table.setColumnWidth(3, 96)
         self._records_table.horizontalHeader().setFixedHeight(_LIST_ROW_HEIGHT)
         self._records_table.verticalHeader().setVisible(False)
         self._records_table.verticalHeader().setDefaultSectionSize(_LIST_ROW_HEIGHT)
         self._records_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._records_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._records_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._records_table.setMinimumHeight(_LIST_ROW_HEIGHT * 5 + 30)
+        self._records_table.setMinimumHeight(_LIST_ROW_HEIGHT * 4 + 28)
         self._records_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         records_layout.addWidget(self._records_table, 1)
-        bottom_row.addWidget(records_card, 3)
-        root.addLayout(bottom_row, 1)
+        root.addWidget(records_card, 1)
 
-        # —— 底部操作 ——
+        # —— 操作条 ——
         actions_card = QFrame()
-        actions_card.setObjectName("Card")
+        actions_card.setObjectName('ActionBar')
         card_layout = QHBoxLayout(actions_card)
-        card_layout.setContentsMargins(10, 10, 10, 10)
+        card_layout.setContentsMargins(8, 8, 8, 8)
         card_layout.setSpacing(_AUTO_BTN_SPACING)
-
         actions = (
-            ("设备初始化", system_run_device_init),
-            ("使能", system_run_servo_on_all),
-            ("回基准点", system_run_go_datum),
-            ("回原点", system_run_go_origin),
-            ("物料初始化", system_run_initialize),
-            ("加料", system_run_dose),
-            ("试剂瓶出料", system_run_bottle_discharge),
+            ('设备初始化', system_run_device_init),
+            ('使能', system_run_servo_on_all),
+            ('回基准点', system_run_go_datum),
+            ('回原点', system_run_go_origin),
+            ('物料初始化', system_run_initialize),
+            ('加料', system_run_dose),
+            ('试剂瓶出料', system_run_bottle_discharge),
         )
         for text, fn in actions:
             btn = QPushButton(text)
             btn.setMinimumWidth(_AUTO_BTN_MIN_WIDTH)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            if text == "加料":
-                btn.setObjectName("PrimaryBtn")
+            if text == '加料':
+                btn.setObjectName('PrimaryBtn')
             btn.clicked.connect(
                 lambda _c=False, f=fn, n=text: self._run_action(f, n)
             )
             self._action_buttons[text] = btn
             self._buttons.append(btn)
             card_layout.addWidget(btn, 1)
-
-        btn_abort = QPushButton("停止")
-        btn_abort.setObjectName("DangerBtn")
+        btn_abort = QPushButton('停止')
+        btn_abort.setObjectName('DangerBtn')
         btn_abort.setMinimumWidth(_AUTO_BTN_MIN_WIDTH)
         btn_abort.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         btn_abort.clicked.connect(self._on_abort)
-        self._action_buttons["停止"] = btn_abort
+        self._action_buttons['停止'] = btn_abort
         self._buttons.append(btn_abort)
         card_layout.addWidget(btn_abort, 1)
         root.addWidget(actions_card)
@@ -828,6 +810,7 @@ class SolidDoserAutoTabWidget(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self._materials_table.setItem(row, 1, item)
             item.setText(code if code else "—")
+            item.setTextAlignment(Qt.AlignCenter)
 
     def _set_controls_for_idle(self, idle: bool) -> None:
         for name, btn in self._action_buttons.items():
@@ -845,6 +828,50 @@ class SolidDoserAutoTabWidget(QWidget):
             self._lift_work_spin.setEnabled(idle)
         if self._lift_work_save_btn is not None:
             self._lift_work_save_btn.setEnabled(idle)
+        if self._materials_clear_btn is not None:
+            self._materials_clear_btn.setEnabled(idle)
+        if self._totals_clear_btn is not None:
+            self._totals_clear_btn.setEnabled(idle)
+
+    def _on_clear_materials(self) -> None:
+        if self._ctx is None or self._ctx.system.is_busy:
+            return
+        reply = QMessageBox.question(
+            self,
+            "清空物料表",
+            "确定清空全部工位条码？清空后需重新「物料初始化」。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, msg = clear_station_materials(self._ctx.system)
+        self._refresh_materials_table(self._ctx.system)
+        text = f"日志 {'成功' if ok else '失败'} · 物料表 · {msg}"
+        if self._log_label is not None:
+            self._log_label.setText(text)
+        if self._action_log_handler is not None:
+            self._action_log_handler(text)
+
+    def _on_clear_totals(self) -> None:
+        if self._ctx is None or self._ctx.system.is_busy:
+            return
+        reply = QMessageBox.question(
+            self,
+            "清空累计加样",
+            "确定清空全部物料累计加样量？此操作不可恢复。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, msg = clear_material_dose_totals()
+        self._reload_material_totals()
+        text = f"日志 {'成功' if ok else '失败'} · 累计加样 · {msg}"
+        if self._log_label is not None:
+            self._log_label.setText(text)
+        if self._action_log_handler is not None:
+            self._action_log_handler(text)
 
     def _sync_lift_work_spin(self) -> None:
         if self._lift_work_spin is None:
@@ -875,11 +902,12 @@ class SolidDoserAutoTabWidget(QWidget):
         row = self._dose_table.rowCount()
         self._dose_table.insertRow(row)
         self._dose_table.setRowHeight(row, _LIST_ROW_HEIGHT)
-        self._dose_table.setItem(row, 0, QTableWidgetItem(material_id))
-        self._dose_table.setItem(row, 1, QTableWidgetItem(weight_text))
-        actual_item = QTableWidgetItem(actual_text)
-        actual_item.setFlags(actual_item.flags() & ~Qt.ItemIsEditable)
-        self._dose_table.setItem(row, 2, actual_item)
+        for col, text in enumerate((material_id, weight_text, actual_text)):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            if col == 2:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self._dose_table.setItem(row, col, item)
 
     def _load_dose_table(self, items: List[DoseItem]) -> None:
         if self._dose_table is None:
@@ -1006,6 +1034,7 @@ class SolidDoserAutoTabWidget(QWidget):
         )
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self._records_table.setItem(row, col, item)
 
