@@ -402,7 +402,11 @@ def system_host_dose_request(
     items: list,
     request_id: str = "",
 ) -> Tuple[bool, str, dict]:
-    """主机加料申请：校验空闲+原点+条码，写入 dose_items，不立刻加料。"""
+    """主机加料申请：校验空闲+原点+试剂瓶3无瓶+物料表后，自动响应并进入等待进瓶。
+
+    通过 → status=accepted，state=waiting_bottle（主机可直接进瓶）。
+    不通过 → status=rejected（主机应退出本次申请）。
+    """
     from Common.HostBottleFeedConfig import CMD_DOSE_REQUEST
 
     rid = (request_id or "").strip()
@@ -424,6 +428,16 @@ def system_host_dose_request(
             **base,
             "status": "rejected",
             "reason": "not_at_origin",
+            "message": msg,
+        }
+
+    bottle3 = bool(ctx.motion_ctx.motion.di_states.get("bottle_3", False))
+    if bottle3:
+        msg = "试剂瓶3已有瓶，不响应加料申请。"
+        return False, msg, {
+            **base,
+            "status": "rejected",
+            "reason": "bottle3_occupied",
             "message": msg,
         }
 
@@ -490,7 +504,20 @@ def system_host_dose_request(
     ctx.system.dose_items = parsed
     ctx.system.host_dose_request_id = rid
     ctx.system.clear_dose_live()
-    msg = f"可以响应加料申请（{len(parsed)} 条）。"
+
+    blocked = _begin(ctx, SystemRunState.WAITING_BOTTLE, "等待进瓶")
+    if blocked is not None:
+        ctx.system.dose_items = []
+        ctx.system.host_dose_request_id = ""
+        return False, blocked[1], {
+            **base,
+            "status": "rejected",
+            "reason": "not_idle",
+            "message": blocked[1],
+        }
+
+    ctx.system.set_progress(0, 1, "等待设备放瓶")
+    msg = f"已响应加料申请（{len(parsed)} 条），进入等待进瓶。"
     ctx.system.last_action = "加料申请"
     ctx.system.last_message = msg
     ctx.system.last_success = True
@@ -498,6 +525,7 @@ def system_host_dose_request(
         **base,
         "status": "accepted",
         "message": msg,
+        "state": "waiting_bottle",
         "items": dose_items_payload(ctx),
     }
 

@@ -33,7 +33,6 @@ from Common.HostBottleFeedConfig import (
     CMD_DEVICE_INIT_DONE,
     CMD_DEVICE_INIT_REQUEST,
     CMD_DOSE_COMPLETE,
-    CMD_DOSE_CONFIRM,
     CMD_DOSE_REQUEST,
     CMD_MATERIAL_INIT_DONE,
     CMD_MATERIAL_INIT_REQUEST,
@@ -204,7 +203,7 @@ class HostSimulatorWindow(QMainWindow):
         title.setObjectName("Title")
         layout.addWidget(title)
         hint = QLabel(
-            "模拟主设备软件：驱动固体加样完成设备初始化 → 物料初始化 → 申请加料 → 进瓶 → 加样 → 取瓶。"
+            "模拟主设备软件：驱动固体加样完成设备初始化 → 物料初始化 → 申请加料（加样侧自动响应） → 进瓶 → 加样 → 取瓶。"
         )
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
@@ -262,12 +261,11 @@ class HostSimulatorWindow(QMainWindow):
         self._btn_dose_request = QPushButton("3. 申请加料")
         self._btn_dose_request.setObjectName("PrimaryBtn")
         self._btn_dose_request.clicked.connect(self._on_dose_request)
-        self._btn_dose_confirm = QPushButton("4. 响应申请（进入等待进瓶）")
-        self._btn_dose_confirm.clicked.connect(self._on_dose_confirm)
-        self._btn_bottle_placed = QPushButton("5. 已放瓶（开始加样）")
+        self._btn_dose_confirm = None
+        self._btn_bottle_placed = QPushButton("4. 已放瓶（开始加样）")
         self._btn_bottle_placed.setObjectName("PrimaryBtn")
         self._btn_bottle_placed.clicked.connect(self._on_bottle_placed)
-        self._btn_bottle_removed = QPushButton("6. 已取瓶（回空闲）")
+        self._btn_bottle_removed = QPushButton("5. 已取瓶（回空闲）")
         self._btn_bottle_removed.setObjectName("PrimaryBtn")
         self._btn_bottle_removed.clicked.connect(self._on_bottle_removed)
         self._btn_abort = QPushButton("中止")
@@ -277,7 +275,6 @@ class HostSimulatorWindow(QMainWindow):
             self._btn_device_init,
             self._btn_material_init,
             self._btn_dose_request,
-            self._btn_dose_confirm,
             self._btn_bottle_placed,
             self._btn_bottle_removed,
             self._btn_abort,
@@ -441,8 +438,6 @@ class HostSimulatorWindow(QMainWindow):
             self._btn_material_init.setEnabled(current == SimStep.IDLE)
         if self._btn_dose_request:
             self._btn_dose_request.setEnabled(current == SimStep.IDLE)
-        if self._btn_dose_confirm:
-            self._btn_dose_confirm.setEnabled(current == SimStep.DOSE_APPLY)
         if self._btn_bottle_placed:
             self._btn_bottle_placed.setEnabled(current == SimStep.WAIT_BOTTLE)
         if self._btn_bottle_removed:
@@ -450,7 +445,7 @@ class HostSimulatorWindow(QMainWindow):
         if self._btn_abort:
             self._btn_abort.setEnabled(current != SimStep.IDLE)
         if self._dose_table is not None:
-            editable = current in (SimStep.IDLE, SimStep.DOSE_APPLY)
+            editable = current == SimStep.IDLE
             self._dose_table.setEnabled(editable)
 
     def _handle_event(self, payload: dict) -> None:
@@ -510,6 +505,7 @@ class HostSimulatorWindow(QMainWindow):
             QMessageBox.warning(self, "申请加料", "请先填写加料清单。")
             return
         self._request_id = HostUdpClient.new_request_id()
+        self._set_step(SimStep.DOSE_APPLY, "加料申请中…")
         resp = self._client.send_cmd(
             {
                 "cmd": CMD_DOSE_REQUEST,
@@ -518,19 +514,15 @@ class HostSimulatorWindow(QMainWindow):
             }
         )
         if resp.get("status") == "accepted":
-            self._set_step(SimStep.DOSE_APPLY, f"加料申请已接受 · {resp.get('message')}")
+            # 加样侧已自动响应并进入等待进瓶 → 本侧直接进瓶
+            self._set_step(
+                SimStep.WAIT_BOTTLE,
+                f"已响应申请，请进瓶 · {resp.get('message')}",
+            )
         else:
-            self._set_step(SimStep.IDLE, f"加料申请被拒绝 · {resp.get('message')}")
+            self._set_step(SimStep.IDLE, f"不响应申请 · {resp.get('message')}")
+            self._request_id = ""
             QMessageBox.warning(self, "申请加料", str(resp.get("message") or resp))
-
-    def _on_dose_confirm(self) -> None:
-        resp = self._client.send_cmd(
-            {"cmd": CMD_DOSE_CONFIRM, "request_id": self._request_id}
-        )
-        if resp.get("status") in ("ok", "success", "accepted"):
-            self._set_step(SimStep.WAIT_BOTTLE, "等待进瓶 · 请将试剂瓶放入加样模块")
-        else:
-            QMessageBox.warning(self, "响应申请", str(resp.get("message") or resp))
 
     def _on_bottle_placed(self) -> None:
         resp = self._client.send_cmd(
