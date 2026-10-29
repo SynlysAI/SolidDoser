@@ -161,7 +161,7 @@ def motion_horizontal_go_named(
 
 
 def motion_indexing_go_origin(ctx: SolidDoserMotionContext) -> ActionResult:
-    """分度电机运行至命名原点位置（81.55°，工位 1）。须已使能且已回基准点。"""
+    """分度电机运行至命名原点位置（341°，工位 1）。须已使能且已回基准点。"""
     blocked = _require_servo_and_datum(ctx, cfg.INDEXING_AXIS_KEY)
     if blocked is not None:
         return blocked

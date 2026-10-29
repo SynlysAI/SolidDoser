@@ -24,7 +24,7 @@ class SolidDoserMotionState:
     axes: Dict[str, AxisMotionState] = field(default_factory=dict)
     do_states: Dict[str, bool] = field(default_factory=dict)
     di_states: Dict[str, bool] = field(default_factory=dict)
-    # 分度盘逻辑工位 1～8；原点与工位 1 均为 81.55°，回基准点后归工位 1
+    # 分度盘逻辑工位 1～8；原点与工位 1 均为 341°，回基准点后归工位 1
     indexing_station: int = 1
     # 升降已使能、已回基准且不高于原点时分度才允许旋转（避免机构碰撞）
     indexing_rotation_allowed: bool = False

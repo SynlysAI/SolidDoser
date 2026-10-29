@@ -41,11 +41,11 @@ STS_BIT_ALARM = 5
 # %MW230 → HR 230；%MD250（占 MW500/501）→ HR 500。
 
 # 分度盘：8 工位，工位号 1～8（与盘面标签一致），相邻相差 45°。
-# 命名原点与工位 1 绑定，均为 INDEXING_STATION1_DEG（81.55°）。
+# 命名原点与工位 1 绑定，均为 INDEXING_STATION1_DEG（341°）。
 INDEXING_STATION_COUNT = 8
 INDEXING_STATION_FIRST = 1
 INDEXING_STEP_DEG = 45.0
-INDEXING_STATION1_DEG = 81.55
+INDEXING_STATION1_DEG = 341.0
 # 加料位与扫码位背对背：加料位停工位 N 时，扫码枪读到的是工位 N+4（模 8）
 INDEXING_FEED_TO_SCAN_OFFSET = 4
 INDEXING_AXIS_KEY = "indexing"
@@ -104,9 +104,9 @@ def horizontal_position_mm(key: str) -> float:
 
 # 升降轴命名位置（mm）：原点 / 工作
 LIFT_AXIS_KEY = "lift"
-LIFT_WORK_MM_DEFAULT = 28.0
-LIFT_WORK_MM_MIN = 22.0
-LIFT_WORK_MM_MAX = 30.0
+LIFT_WORK_MM_DEFAULT = 15.0
+LIFT_WORK_MM_MIN = 10.0
+LIFT_WORK_MM_MAX = 20.0
 
 # 运行时覆盖（启动时从数据库加载；界面修改后更新）
 _lift_work_mm: float = LIFT_WORK_MM_DEFAULT
@@ -120,7 +120,7 @@ class LiftNamedPosition:
 
 
 LIFT_POSITIONS: Tuple[LiftNamedPosition, ...] = (
-    LiftNamedPosition("origin", "原点位置", 10.0),
+    LiftNamedPosition("origin", "原点位置", 0.0),
     LiftNamedPosition("work", "工作位置", LIFT_WORK_MM_DEFAULT),
 )
 
@@ -138,7 +138,7 @@ def get_lift_work_mm() -> float:
 
 
 def set_lift_work_mm(value: float) -> float:
-    """设置升降工作位（mm），自动夹到 22～30。"""
+    """设置升降工作位（mm），自动夹到 LIFT_WORK_MM_MIN～MAX。"""
     global _lift_work_mm
     _lift_work_mm = clamp_lift_work_mm(value)
     return _lift_work_mm
